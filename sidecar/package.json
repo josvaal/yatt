@@ -1,0 +1,11 @@
+{
+  "name": "yatt-sidecar",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "bun run index.ts"
+  },
+  "dependencies": {
+    "playwright": "^1.62.1"
+  }
+}
