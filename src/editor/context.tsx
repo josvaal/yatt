@@ -10,9 +10,14 @@ import {
 } from "react";
 
 import {
+  baselineList,
   closeBrowser,
   defaultTest,
+  deleteSession,
   deleteTest,
+  evalCondition,
+  exportPlaywright,
+  listSessions,
   listTests,
   loadTest,
   onSidecarEvent,
@@ -27,18 +32,28 @@ import {
   reportPath,
   reportSave,
   runStep,
+  saveSession,
   saveTest,
   startGrab,
+  tabClose,
+  tabList,
+  tabOpen,
+  tabSwitch,
   toolbarVars,
   describeStep,
+  isContainerStep,
+  type BrowserKind,
   type PreviewState,
   type SidecarEvent,
   type Step,
   type StepResult,
+  type TabInfo,
   type TestFile,
+  type ViewportPreset,
 } from "@/lib/yatt";
 import {
   ENV_DEFAULT,
+  interpolate,
   newVariable,
   parseCsv,
   resolveStep,
@@ -56,6 +71,7 @@ import {
   type RunReport,
   type SetTestResult,
 } from "@/lib/report";
+import { buildPlaywrightSpec } from "@/lib/export";
 
 export type StepStatus = "pending" | "running" | "ok" | "fail";
 export type Ids = string;
@@ -69,6 +85,136 @@ export interface LastResult {
 }
 
 export type PageId = "editor" | "variables" | "data" | "run" | "reports";
+
+/** Acumulador de una corrida: filas del reporte + contadores + bandera de stop. */
+interface RunState {
+  records: RunRecord[];
+  ok: number;
+  fail: number;
+  skipped: number;
+  counter: number;
+  stopped: boolean;
+}
+
+/** Busca un paso por id en un árbol de pasos (children/elseChildren). */
+function findStepRec(list: Step[], id: string): Step | null {
+  for (const s of list) {
+    if (s.id === id) return s;
+    const c = findStepRec(s.children ?? [], id) ?? findStepRec(s.elseChildren ?? [], id);
+    if (c) return c;
+  }
+  return null;
+}
+
+/** Presets de viewport (RF-26). */
+export const VIEWPORTS: Record<ViewportPreset, { width: number; height: number }> = {
+  desktop: { width: 1280, height: 800 },
+  tablet: { width: 768, height: 1024 },
+  mobile: { width: 390, height: 844 },
+};
+
+/** Variables sensibles (RNF-05): sus valores se enmascaran en reportes. */
+const SENSITIVE_RE = /(pass|pwd|secret|token|api[_-]?key|clave)/i;
+
+function maskSensitive(
+  text: string | undefined,
+  vars: Record<string, string>,
+  names: string[],
+): string | undefined {
+  if (!text || names.length === 0) return text;
+  let out = text;
+  for (const n of names) {
+    const v = vars[n];
+    if (v && v.length > 1) out = out.split(v).join(`{{${n}}}`);
+  }
+  return out;
+}
+
+/** Aplica `fn` a un paso por id en todo el árbol (pasos y bloques anidados). */
+function mapStepRec(list: Step[], id: string, fn: (s: Step) => Step): Step[] {
+  return list.map((s) => {
+    if (s.id === id) return fn(s);
+    const withChildren = s.children ? { ...s, children: mapStepRec(s.children, id, fn) } : s;
+    const withElse = withChildren.elseChildren
+      ? { ...withChildren, elseChildren: mapStepRec(withChildren.elseChildren, id, fn) }
+      : withChildren;
+    return withElse;
+  });
+}
+
+/** Elimina un paso (y sus descendientes) del árbol. */
+function removeStepRec(list: Step[], id: string): Step[] {
+  return list
+    .filter((s) => s.id !== id)
+    .map((s) => {
+      let out = s;
+      if (s.children) {
+        const c = removeStepRec(s.children, id);
+        if (c !== s.children) out = { ...out, children: c };
+      }
+      if (s.elseChildren) {
+        const c = removeStepRec(s.elseChildren, id);
+        if (c !== s.elseChildren) out = { ...out, elseChildren: c };
+      }
+      return out;
+    });
+}
+
+/** Inserta una copia (pausada) justo después del paso, en su mismo nivel. */
+function duplicateRec(list: Step[], id: string): Step[] {
+  const i = list.findIndex((s) => s.id === id);
+  if (i >= 0) {
+    const copy: Step = { ...list[i], id: crypto.randomUUID(), disabled: true };
+    const next = [...list];
+    next.splice(i + 1, 0, copy);
+    return next;
+  }
+  return list.map((s) => {
+    let out = s;
+    if (s.children) {
+      const c = duplicateRec(s.children, id);
+      if (c !== s.children) out = { ...out, children: c };
+    }
+    if (s.elseChildren) {
+      const c = duplicateRec(s.elseChildren, id);
+      if (c !== s.elseChildren) out = { ...out, elseChildren: c };
+    }
+    return out;
+  });
+}
+
+/** Reordena un paso dentro de su nivel (entre hermanos). */
+function moveRec(list: Step[], id: string, dir: -1 | 1): Step[] {
+  const i = list.findIndex((s) => s.id === id);
+  if (i >= 0) {
+    const j = i + dir;
+    if (j < 0 || j >= list.length) return list;
+    const next = [...list];
+    [next[i], next[j]] = [next[j], next[i]];
+    return next;
+  }
+  return list.map((s) => {
+    let out = s;
+    if (s.children) {
+      const c = moveRec(s.children, id, dir);
+      if (c !== s.children) out = { ...out, children: c };
+    }
+    if (s.elseChildren) {
+      const c = moveRec(s.elseChildren, id, dir);
+      if (c !== s.elseChildren) out = { ...out, elseChildren: c };
+    }
+    return out;
+  });
+}
+
+/** Todos los ids de un paso y sus descendientes (para limpiar estados). */
+function collectIds(step: Step): string[] {
+  return [
+    step.id,
+    ...(step.children ?? []).flatMap(collectIds),
+    ...(step.elseChildren ?? []).flatMap(collectIds),
+  ];
+}
 
 interface EditorContextValue {
   // navegación
@@ -84,6 +230,20 @@ interface EditorContextValue {
   setAppError: (e: string | null) => void;
   url: string;
   setUrl: (u: string) => void;
+
+  // entorno del navegador (RF-26/27)
+  browserKind: BrowserKind;
+  setBrowserKind: (b: BrowserKind) => void;
+  viewportKind: ViewportPreset;
+  setViewportKind: (v: ViewportPreset) => void;
+  timezoneId: string;
+  setTimezoneId: (t: string) => void;
+  geoEnabled: boolean;
+  setGeoEnabled: (v: boolean) => void;
+  geoLat: string;
+  setGeoLat: (v: string) => void;
+  geoLon: string;
+  setGeoLon: (v: string) => void;
 
   // pasos
   steps: Step[];
@@ -126,7 +286,7 @@ interface EditorContextValue {
   csvText: string;
   setCsvText: (v: string) => void;
   dataset: Dataset | null;
-  datasetReport: Array<{ ok: boolean; label: string; error?: string }> | null;
+  datasetReport: Array<{ ok: boolean; row: number; passed: number; total: number; stopped: boolean }> | null;
 
   // ejecución
   runningAll: boolean;
@@ -174,12 +334,36 @@ interface EditorContextValue {
   handleClose: () => Promise<void>;
   handleRestart: () => Promise<void>;
 
+  // multi-pestaña (RF-22)
+  tabs: TabInfo[];
+  refreshTabs: () => Promise<void>;
+  handleTabOpen: (url: string) => Promise<void>;
+  handleTabSwitch: (index: number) => Promise<void>;
+  handleTabClose: (index?: number) => Promise<void>;
+
+  // sesión / estado (RF-23)
+  savedSessions: string[];
+  refreshSessions: () => Promise<void>;
+  handleSaveSession: (name: string) => Promise<void>;
+  handleLoadSession: (name: string) => Promise<void>;
+  handleDeleteSession: (name: string) => Promise<void>;
+
+  // asserts visuales (RF-20): imágenes base existentes
+  baselines: string[];
+  refreshBaselines: () => Promise<void>;
+
+  // export a Playwright (RF-24)
+  exporting: boolean;
+  handleExport: () => Promise<void>;
+
   // pasos CRUD
   addStep: (step: Omit<Step, "id">) => void;
   removeStep: (id: Ids) => void;
   startReplace: (id: Ids) => void;
   startEdit: (step: Step) => void;
   saveEdit: (id: Ids) => void;
+  /** Aplica campos sueltos a un paso (config de contenedores, tolerancia…). */
+  patchStep: (id: Ids, partial: Partial<Step>) => void;
   duplicateStep: (id: Ids) => void;
   moveStep: (id: Ids, dir: -1 | 1) => void;
   togglePause: (id: Ids) => void;
@@ -201,7 +385,7 @@ interface EditorContextValue {
   addEnv: () => void;
 
   // dataset
-  importCsv: () => void;
+  importCsv: () => boolean;
   handleRunDataset: () => Promise<void>;
 }
 
@@ -217,6 +401,12 @@ export function EditorProvider({ children }: { children: ReactNode }) {
   const [page, setPage] = useState<PageId>("editor");
   const [url, setUrl] = useState("https://example.com");
   const [headless, setHeadless] = useState(false);
+  const [browserKind, setBrowserKind] = useState<BrowserKind>("chromium");
+  const [viewportKind, setViewportKind] = useState<ViewportPreset>("desktop");
+  const [timezoneId, setTimezoneId] = useState("");
+  const [geoEnabled, setGeoEnabled] = useState(false);
+  const [geoLat, setGeoLat] = useState("-34.6037");
+  const [geoLon, setGeoLon] = useState("-58.3816");
   const [connected, setConnected] = useState(false);
   const [browserOpen, setBrowserOpen] = useState(false);
   const [steps, setSteps] = useState<Step[]>([]);
@@ -234,7 +424,7 @@ export function EditorProvider({ children }: { children: ReactNode }) {
   const [csvText, setCsvText] = useState("");
   const [dataset, setDataset] = useState<Dataset | null>(null);
   const [datasetReport, setDatasetReport] = useState<
-    Array<{ ok: boolean; label: string; error?: string }> | null
+    Array<{ ok: boolean; row: number; passed: number; total: number; stopped: boolean }> | null
   >(null);
   const [runningDataset, setRunningDataset] = useState(false);
   const [runningAll, setRunningAll] = useState(false);
@@ -248,6 +438,10 @@ export function EditorProvider({ children }: { children: ReactNode }) {
   const [lastReport, setLastReport] = useState<RunReport | null>(null);
   const [lastReportPath, setLastReportPath] = useState<string | null>(null);
   const [savedReports, setSavedReports] = useState<string[]>([]);
+  const [tabs, setTabs] = useState<TabInfo[]>([]);
+  const [savedSessions, setSavedSessions] = useState<string[]>([]);
+  const [baselines, setBaselines] = useState<string[]>([]);
+  const [exporting, setExporting] = useState(false);
   const [setProgress, setSetProgress] = useState<{
     current: string;
     index: number;
@@ -305,6 +499,34 @@ export function EditorProvider({ children }: { children: ReactNode }) {
       setSavedReports(await reportList());
     } catch {
       /* la carpeta reports aún no existe */
+    }
+  }, []);
+
+  const refreshTabs = useCallback(async () => {
+    if (!browserOpenRef.current) {
+      setTabs([]);
+      return;
+    }
+    try {
+      setTabs(await tabList());
+    } catch {
+      /* navegador a mitad de cierre */
+    }
+  }, []);
+
+  const refreshSessions = useCallback(async () => {
+    try {
+      setSavedSessions(await listSessions());
+    } catch {
+      /* sesiones aún no existen */
+    }
+  }, []);
+
+  const refreshBaselines = useCallback(async () => {
+    try {
+      setBaselines(await baselineList());
+    } catch {
+      /* baselines aún no existen */
     }
   }, []);
 
@@ -377,9 +599,17 @@ export function EditorProvider({ children }: { children: ReactNode }) {
           setBrowserOpen(Boolean(data?.open));
           if (data?.open) {
             setTimeout(refreshPreview, 150);
+            refreshTabs();
+            refreshSessions();
           } else {
             setPreview(null);
+            setTabs([]);
           }
+          break;
+        }
+        case "tabs_changed": {
+          const d = ev.data as { tabs?: TabInfo[] };
+          if (Array.isArray(d?.tabs)) setTabs(d.tabs);
           break;
         }
         case "sidecar_ready":
@@ -420,34 +650,292 @@ export function EditorProvider({ children }: { children: ReactNode }) {
     pingSidecar().then(() => setConnected(true)).catch(() => setConnected(false));
     refreshSaved();
     refreshReports();
+    refreshSessions();
+    refreshBaselines();
     return () => {
       cancelled = true;
       unlisten?.();
     };
-  }, [refreshSaved, refreshPreview, refreshReports]);
+  }, [refreshSaved, refreshPreview, refreshReports, refreshSessions, refreshBaselines]);
 
-  const runOne = useCallback(
-    async (step: Step, statusId?: Ids) => {
-      const id = statusId ?? step.id;
-      if (busyRef.current) return null;
-      busyRef.current = true;
-      setStatus((prev) => ({ ...prev, [id]: "running" }));
-      try {
-        const r = (await runStep(step, stepTimeoutRef.current)) as StepResult;
-        setStatus((prev) => ({ ...prev, [id]: r.ok ? "ok" : "fail" }));
-        setLastResult({ stepId: id, ok: r.ok, error: r.error, ms: r.ms, screenshot: r.screenshot });
-        refreshPreview();
-        return { ok: r.ok, ms: r.ms, error: r.error, screenshot: r.screenshot };
-      } catch (err) {
-        setStatus((prev) => ({ ...prev, [id]: "fail" }));
-        setLastResult({ stepId: id, ok: false, error: String(err) });
-        return { ok: false, error: String(err) };
-      } finally {
-        busyRef.current = false;
+  /** Ejecuta un paso hoja contra el sidecar (sin guard de concurrencia:
+   *  lo usan los corredores en serie). Interpola variables y avisa al UI. */
+  async function runLeaf(step: Step, statusId: Ids, vars: Record<string, string>) {
+    setStatus((prev) => ({ ...prev, [statusId]: "running" }));
+    try {
+      const r = (await runStep(resolveStep(step, vars), stepTimeoutRef.current)) as StepResult;
+      setStatus((prev) => ({ ...prev, [statusId]: r.ok ? "ok" : "fail" }));
+      setLastResult({
+        stepId: statusId,
+        ok: r.ok,
+        error: r.error,
+        ms: r.ms,
+        screenshot: r.screenshot,
+      });
+      refreshPreview();
+      return r;
+    } catch (err) {
+      setStatus((prev) => ({ ...prev, [statusId]: "fail" }));
+      setLastResult({ stepId: statusId, ok: false, error: String(err) });
+      return { ok: false, error: String(err) };
+    }
+  }
+
+  /** Ejecuta un paso individual (botón ▶ de la fila). Los pasos de bloque se
+   *  corren completos con su propio estado de corrida; las hojas van al sidecar. */
+  async function runOne(step: Step, statusId?: Ids, vars: Record<string, string> = {}) {
+    const id = statusId ?? step.id;
+    if (busyRef.current) return null;
+    busyRef.current = true;
+    try {
+      if (isContainerStep(step)) {
+        const state: RunState = { records: [], ok: 0, fail: 0, skipped: 0, counter: 0, stopped: false };
+        setStatus((prev) => ({ ...prev, [id]: "running" }));
+        // Un paso de bloque suelto no pausa antes de cada hijo (solo el runner global).
+        await runStepList([step], vars, state, { stepByStep: false });
+        const ok = state.fail === 0 && !state.stopped;
+        setStatus((prev) => ({ ...prev, [id]: ok ? "ok" : "fail" }));
+        const error = state.stopped
+          ? "detenido por el usuario"
+          : state.fail > 0
+            ? `${state.fail} paso(s) fallaron dentro del bloque`
+            : undefined;
+        setLastResult({ stepId: id, ok, error });
+        return { ok, error };
       }
-    },
-    [refreshPreview],
-  );
+      return await runLeaf(step, id, vars);
+    } finally {
+      busyRef.current = false;
+    }
+  }
+
+  /** Resuelve el mapeo `withVars` de un sub-flujo: `{{var}}` interpolada con el
+   *  ámbito actual, nombre simple que exista en el ámbito, o literal. */
+  function resolveFlowMapping(src: string, vars: Record<string, string>): string {
+    if (/^\{\{[\w.-]+\}\}$/.test(src)) return interpolate(src, vars) ?? "";
+    if (Object.prototype.hasOwnProperty.call(vars, src)) return vars[src];
+    return src;
+  }
+
+  /** Ejecuta un paso de bloque (if/repeat/for_each/run_flow) y registra su fila
+   *  en el reporte. Los hijos se cuentan en `state` de forma natural. */
+  async function execContainerStep(
+    step: Step,
+    vars: Record<string, string>,
+    state: RunState,
+    opts: { depth: number; flowStack: string[]; stepByStep?: boolean },
+  ) {
+    const depth = opts.depth;
+    const base = (summary: string, status: "ok" | "fail" = "ok", error?: string): RunRecord => ({
+      index: ++state.counter,
+      action: step.action,
+      selector: step.selector,
+      value: step.value,
+      depth,
+      status,
+      summary,
+      error,
+    });
+    const branch = async (list: Step[] | undefined, childVars: Record<string, string>) => {
+      const beforeOk = state.ok;
+      const beforeFail = state.fail;
+      await runStepList(list ?? [], childVars, state, {
+        depth: depth + 1,
+        flowStack: opts.flowStack,
+        stepByStep: opts.stepByStep ?? true,
+      });
+      return { ok: state.ok - beforeOk, fail: state.fail - beforeFail };
+    };
+
+    if (step.action === "if") {
+      const cond = resolveStep(step, vars);
+      let trueBranch: boolean;
+      try {
+        const res = await evalCondition(cond.selector, cond.value);
+        trueBranch = Boolean(res?.value);
+      } catch (err) {
+        state.records.push(base(`si: no se pudo evaluar (${String(err).split("\n")[0]})`, "fail"));
+        state.fail++;
+        return;
+      }
+      const branchList = trueBranch ? step.children : step.elseChildren;
+      if (branchList?.length) {
+        const r = await branch(branchList, vars);
+        state.records.push(
+          base(`${trueBranch ? "sí" : "si no"} · ${r.ok} ok${r.fail ? ` · ${r.fail} fallo` : ""}`),
+        );
+        state.ok++;
+      } else {
+        state.records.push(base(`${trueBranch ? "condición verdadera" : "condición falsa"} · sin pasos en la rama`));
+        state.ok++;
+      }
+      return;
+    }
+
+    if (step.action === "repeat") {
+      const times = Math.max(0, Math.floor(Number(step.times) || 0));
+      if (times === 0) {
+        state.records.push(base("0 repeticiones"));
+        state.ok++;
+        return;
+      }
+      let iterOk = 0;
+      let iterFail = 0;
+      for (let i = 1; i <= times; i++) {
+        if (stopRef.current) {
+          state.stopped = true;
+          break;
+        }
+        if (pauseRef.current) await waitResume();
+        const r = await branch(step.children, vars);
+        iterOk += r.ok;
+        iterFail += r.fail;
+      }
+      state.records.push(base(`×${times} · ${iterOk} ok${iterFail ? ` · ${iterFail} fallo` : ""}`));
+      state.ok++;
+      return;
+    }
+
+    if (step.action === "for_each") {
+      const listVal = (interpolate(step.list, vars) ?? "").trim();
+      const items = listVal
+        .split(",")
+        .map((s) => s.trim())
+        .filter(Boolean);
+      if (items.length === 0) {
+        state.records.push(base("lista vacía · 0 iteraciones"));
+        state.ok++;
+        return;
+      }
+      if (!step.itemVar) {
+        state.records.push(base("falta la variable del item", "fail"));
+        state.fail++;
+        return;
+      }
+      let iterOk = 0;
+      let iterFail = 0;
+      for (const item of items) {
+        if (stopRef.current) {
+          state.stopped = true;
+          break;
+        }
+        if (pauseRef.current) await waitResume();
+        const r = await branch(step.children, { ...vars, [step.itemVar!]: item });
+        iterOk += r.ok;
+        iterFail += r.fail;
+      }
+      state.records.push(
+        base(`${items.length} ítem(s) · ${iterOk} ok${iterFail ? ` · ${iterFail} fallo` : ""}`),
+      );
+      state.ok++;
+      return;
+    }
+
+    // run_flow (RF-21): sub-flujo = test guardado, ejecutado en la misma página.
+    const flowName = (interpolate(step.flow, vars) ?? "").trim();
+    if (!flowName) {
+      state.records.push(base("falta el nombre del sub-flujo", "fail"));
+      state.fail++;
+      return;
+    }
+    if (opts.flowStack.includes(flowName)) {
+      state.records.push(base(`flujo circular: ${flowName}`, "fail"));
+      state.fail++;
+      return;
+    }
+    if (opts.flowStack.length >= 8) {
+      state.records.push(base("máximo 8 niveles de sub-flujos", "fail"));
+      state.fail++;
+      return;
+    }
+    let doc: TestFile;
+    try {
+      doc = JSON.parse(await loadTest(flowName)) as TestFile;
+    } catch {
+      state.records.push(base(`no se pudo leer el sub-flujo "${flowName}"`, "fail"));
+      state.fail++;
+      return;
+    }
+    const fvars = resolveVars(doc.variables ?? [], ENV_DEFAULT, {});
+    for (const [flowVar, src] of Object.entries(step.withVars ?? {})) {
+      fvars[flowVar] = resolveFlowMapping(src, vars);
+    }
+    const r = await branch(doc.steps ?? [], fvars);
+    state.records.push(
+      base(`sub-flujo "${doc.name || flowName}" · ${r.ok} ok${r.fail ? ` · ${r.fail} fallo` : ""}`),
+    );
+    state.ok++;
+  }
+
+  /** Corredor recursivo de una lista de pasos (Fase 4): respeta pausa, detención
+   *  y paso a paso, resuelve bloques (if/repeat/for_each/run_flow) y acumula el
+   *  reporte en `state`. */
+  async function runStepList(
+    list: Step[],
+    vars: Record<string, string>,
+    state: RunState,
+    opts: { depth?: number; flowStack?: string[]; stepByStep?: boolean; sensitiveNames?: string[] } = {},
+  ) {
+    const depth = opts.depth ?? 0;
+    const flowStack = opts.flowStack ?? [];
+    for (const step of list) {
+      if (stopRef.current) {
+        state.stopped = true;
+        break;
+      }
+      if (pauseRef.current) await waitResume();
+      if (stopRef.current) {
+        state.stopped = true;
+        break;
+      }
+      if ((opts.stepByStep ?? true) && stepByStepRef.current) {
+        requestPause();
+        await waitResume();
+      }
+      if (stopRef.current) {
+        state.stopped = true;
+        break;
+      }
+      const base: RunRecord = {
+        index: ++state.counter,
+        action: step.action,
+        selector: step.selector,
+        value: step.value,
+        attribute: step.attribute,
+        depth,
+        status: "ok",
+      };
+      if (step.disabled) {
+        state.records.push({ ...base, status: "skipped" });
+        state.skipped++;
+        continue;
+      }
+      if (isContainerStep(step)) {
+        await execContainerStep(step, vars, state, { depth, flowStack, stepByStep: opts.stepByStep });
+        continue;
+      }
+      const r = await runLeaf(step, step.id, vars);
+      if (r) {
+        if (r.ok) {
+          state.ok++;
+          state.records.push({ ...base, status: "ok", ms: r.ms });
+        } else {
+          state.fail++;
+          state.records.push({
+            ...base,
+            status: "fail",
+            ms: r.ms,
+            // RNF-05: los valores de variables sensibles no quedan en los reportes.
+            error: maskSensitive(r.error, vars, opts.sensitiveNames ?? []),
+            screenshot: r.screenshot,
+          });
+        }
+      } else {
+        state.fail++;
+        state.records.push({ ...base, status: "fail", error: "no se pudo ejecutar el paso" });
+      }
+    }
+  }
 
   /** Pausa/reanuda entre pasos (RF-17): la puerta se suelta desde Reanudar o Detener. */
   function waitResume() {
@@ -473,56 +961,10 @@ export function EditorProvider({ children }: { children: ReactNode }) {
       setLastResult(null);
       logsRef.current = [];
       const startedAt = new Date().toISOString();
-      const records: RunRecord[] = [];
-      let okCount = 0;
-      let failCount = 0;
-      let skippedCount = 0;
-      let stopped = false;
-      for (const step of steps) {
-        if (stopRef.current) {
-          stopped = true;
-          break;
-        }
-        if (pauseRef.current) await waitResume();
-        // Modo paso a paso: pausa antes de cada paso para revisarlo (RF-17).
-        if (stopRef.current) {
-          stopped = true;
-          break;
-        }
-        if (stepByStepRef.current) {
-          requestPause();
-          await waitResume();
-        }
-        if (stopRef.current) {
-          stopped = true;
-          break;
-        }
-        const base: RunRecord = {
-          index: records.length + 1,
-          action: step.action,
-          selector: step.selector,
-          value: step.value,
-          attribute: step.attribute,
-          status: "ok",
-        };
-        if (step.disabled) {
-          records.push({ ...base, status: "skipped" });
-          skippedCount++;
-          continue;
-        }
-        const r = await runOne(resolveStep(step, vars), step.id);
-        if (r) {
-          records.push({
-            ...base,
-            status: r.ok ? "ok" : "fail",
-            ms: r.ms,
-            error: r.error,
-            screenshot: r.screenshot,
-          });
-          if (r.ok) okCount++;
-          else failCount++;
-        }
-      }
+      const state: RunState = { records: [], ok: 0, fail: 0, skipped: 0, counter: 0, stopped: false };
+      await runStepList(steps, vars, state, {
+        sensitiveNames: variables.filter((v) => SENSITIVE_RE.test(v.name)).map((v) => v.name),
+      });
       setRunningAll(false);
       setStopping(false);
       setPaused(false);
@@ -537,17 +979,24 @@ export function EditorProvider({ children }: { children: ReactNode }) {
         startedAt,
         finishedAt,
         durationMs: Date.parse(finishedAt) - Date.parse(startedAt),
-        ok: okCount,
-        fail: failCount,
-        skipped: skippedCount,
-        stopped,
+        ok: state.ok,
+        fail: state.fail,
+        skipped: state.skipped,
+        stopped: state.stopped,
         logs: logsRef.current.slice(),
-        steps: records,
+        steps: state.records,
       };
       setLastReport(report);
-      return { okCount, failCount, skipped: skippedCount, stopped, total: okCount + failCount, report };
+      return {
+        okCount: state.ok,
+        failCount: state.fail,
+        skipped: state.skipped,
+        stopped: state.stopped,
+        total: state.ok + state.fail,
+        report,
+      };
     },
-    [steps, runOne, testName, url, activeEnv, headless],
+    [steps, testName, url, activeEnv, headless, variables],
   );
 
   const runAll = useCallback(async () => {
@@ -619,21 +1068,39 @@ export function EditorProvider({ children }: { children: ReactNode }) {
     }
   }, []);
 
+  /** Opciones del navegador según el entorno del editor (RF-26/27). */
+  function buildOpenOptions(targetUrl: string, targetHeadless: boolean, session?: string) {
+    return {
+      url: targetUrl || "https://example.com",
+      headless: targetHeadless,
+      variables: variables.map((v) => v.name),
+      ...(session ? { session } : {}),
+      browser: browserKind,
+      viewport: VIEWPORTS[viewportKind],
+      ...(timezoneId ? { timezoneId } : {}),
+      ...(geoEnabled
+        ? { geolocation: { latitude: Number(geoLat) || 0, longitude: Number(geoLon) || 0 } }
+        : {}),
+    };
+  }
+
   const handleOpen = useCallback(
     async (mode: "visible" | "headless") => {
       setAppError(null);
       try {
-        await openBrowser(
-          url || "https://example.com",
-          mode === "headless",
-          variables.map((v) => v.name),
-        );
+        await openBrowser(buildOpenOptions(url, mode === "headless"));
         setHeadless(mode === "headless");
       } catch (err) {
-        setAppError(`No se pudo abrir el navegador: ${String(err)}`);
+        const msg = String(err);
+        // Los motores de Playwright (en especial webkit en distros no-Debian)
+        // fallan por librerías del sistema ausentes; el mensaje lo aclara.
+        const hint = /missing dependencies/i.test(msg)
+          ? " — faltan dependencias del sistema para el motor elegido, instala las librerías que indica el mensaje y reintenta"
+          : "";
+        setAppError(`No se pudo abrir el navegador: ${msg}${hint}`);
       }
     },
-    [url, variables],
+    [url, variables, browserKind, viewportKind, timezoneId, geoEnabled, geoLat, geoLon],
   );
 
   const handleClose = useCallback(async () => {
@@ -659,7 +1126,7 @@ export function EditorProvider({ children }: { children: ReactNode }) {
     try {
       await closeBrowser();
       setPreview(null);
-      await openBrowser(url || "https://example.com", headless, variables.map((v) => v.name));
+      await openBrowser(buildOpenOptions(url, headless));
       // Los estados ok/fallo quedaron stale tras el reinicio total.
       setStatus({});
       setLastResult(null);
@@ -668,7 +1135,115 @@ export function EditorProvider({ children }: { children: ReactNode }) {
     } finally {
       setRestarting(false);
     }
-  }, [url, headless, variables]);
+  }, [url, headless, variables, browserKind, viewportKind, timezoneId, geoEnabled, geoLat, geoLon]);
+
+  // ---- Multi-pestaña (RF-22) ----
+
+  const handleTabOpen = useCallback(
+    async (url: string) => {
+      setAppError(null);
+      try {
+        const r = await tabOpen(url);
+        if (Array.isArray(r?.tabs)) setTabs(r.tabs);
+        refreshPreview();
+      } catch (err) {
+        setAppError(String(err));
+      }
+    },
+    [refreshPreview],
+  );
+
+  const handleTabSwitch = useCallback(
+    async (index: number) => {
+      setAppError(null);
+      try {
+        const r = await tabSwitch(index);
+        if (Array.isArray(r?.tabs)) setTabs(r.tabs);
+        refreshPreview();
+      } catch (err) {
+        setAppError(String(err));
+      }
+    },
+    [refreshPreview],
+  );
+
+  const handleTabClose = useCallback(
+    async (index?: number) => {
+      setAppError(null);
+      try {
+        const r = await tabClose(index);
+        if (Array.isArray(r?.tabs)) setTabs(r.tabs);
+        refreshPreview();
+      } catch (err) {
+        setAppError(String(err));
+      }
+    },
+    [refreshPreview],
+  );
+
+  // ---- Sesión / estado (RF-23) ----
+
+  const handleSaveSession = useCallback(
+    async (name: string) => {
+      setAppError(null);
+      try {
+        await saveSession(name);
+        await refreshSessions();
+      } catch (err) {
+        setAppError(String(err));
+      }
+    },
+    [refreshSessions],
+  );
+
+  const handleLoadSession = useCallback(
+    async (name: string) => {
+      setAppError(null);
+      try {
+        if (browserOpenRef.current) {
+          await closeBrowser();
+          setBrowserOpen(false);
+          setPreview(null);
+          setTabs([]);
+        }
+        await openBrowser(buildOpenOptions(url, headless, name));
+        setTimeout(refreshPreview, 150);
+      } catch (err) {
+        setAppError(`No se pudo cargar la sesión: ${String(err)}`);
+      }
+    },
+    [url, headless, variables, browserKind, viewportKind, timezoneId, geoEnabled, geoLat, geoLon, refreshPreview],
+  );
+
+  const handleDeleteSession = useCallback(
+    async (name: string) => {
+      try {
+        await deleteSession(name);
+        await refreshSessions();
+      } catch (err) {
+        setAppError(String(err));
+      }
+    },
+    [refreshSessions],
+  );
+
+  // ---- Export a Playwright (RF-24) ----
+
+  const handleExport = useCallback(async () => {
+    setExporting(true);
+    setAppError(null);
+    try {
+      const doc = defaultTest(testName.trim() || "mi-test", url, steps, variables, envs, dataset ?? undefined);
+      const spec = await buildPlaywrightSpec(doc, loadTest);
+      const safe = (doc.name || "mi-test").replace(/[^a-zA-Z0-9._-]+/g, "-");
+      const path = await exportPlaywright(`${safe}.spec.ts`, spec);
+      await openReport(path);
+    } catch (err) {
+      setAppError(`No se pudo exportar: ${String(err)}`);
+    } finally {
+      setExporting(false);
+    }
+  }, [testName, url, steps, variables, envs, dataset]);
 
   // Mantiene al día el desplegable de variables de la barra flotante mientras el
   // navegador está abierto (debounce: los valores se editan en cada tecla).
@@ -684,8 +1259,34 @@ export function EditorProvider({ children }: { children: ReactNode }) {
     setSteps((prev) => [...prev, { ...step, id: crypto.randomUUID() }]);
   }
 
+  /** Quita un paso (y sus descendientes) de todo el árbol. */
   function removeStep(id: Ids) {
-    setSteps((prev) => prev.filter((s) => s.id !== id));
+    const target = findStepRec(steps, id);
+    const ids = target ? collectIds(target) : [id];
+    setSteps((prev) => removeStepRec(prev, id));
+    setStatus((prev) => {
+      const next = { ...prev };
+      ids.forEach((i) => delete next[i]);
+      return next;
+    });
+  }
+
+  /** Inserta una copia del paso justo después de él, en su mismo nivel. */
+  function duplicateStep(id: Ids) {
+    setSteps((prev) => duplicateRec(prev, id));
+  }
+
+  function moveStep(id: Ids, dir: -1 | 1) {
+    setSteps((prev) => moveRec(prev, id, dir));
+  }
+
+  function togglePause(id: Ids) {
+    setSteps((prev) => mapStepRec(prev, id, (s) => ({ ...s, disabled: !s.disabled })));
+  }
+
+  /** Aplica campos sueltos a un paso (config de contenedores, tolerancia…). */
+  function patchStep(id: Ids, partial: Partial<Step>) {
+    setSteps((prev) => mapStepRec(prev, id, (s) => ({ ...s, ...partial })));
     setStatus((prev) => {
       const next = { ...prev };
       delete next[id];
@@ -708,51 +1309,14 @@ export function EditorProvider({ children }: { children: ReactNode }) {
   }
 
   function saveEdit(id: Ids) {
-    setSteps((prev) =>
-      prev.map((s) =>
-        s.id === id
-          ? { ...s, selector: draftSelector.trim() || undefined, value: draftValue || undefined }
-          : s,
-      ),
-    );
-    setStatus((prev) => {
-      const next = { ...prev };
-      delete next[id];
-      return next;
-    });
+    patchStep(id, { selector: draftSelector.trim() || undefined, value: draftValue || undefined });
     setEditingId(null);
     setLastResult(null);
   }
 
-  function duplicateStep(id: Ids) {
-    setSteps((prev) => {
-      const i = prev.findIndex((s) => s.id === id);
-      if (i < 0) return prev;
-      const copy: Step = { ...prev[i], id: crypto.randomUUID(), disabled: true };
-      const next = [...prev];
-      next.splice(i + 1, 0, copy);
-      return next;
-    });
-  }
-
-  function moveStep(id: Ids, dir: -1 | 1) {
-    setSteps((prev) => {
-      const i = prev.findIndex((s) => s.id === id);
-      const j = i + dir;
-      if (i < 0 || j < 0 || j >= prev.length) return prev;
-      const next = [...prev];
-      [next[i], next[j]] = [next[j], next[i]];
-      return next;
-    });
-  }
-
-  function togglePause(id: Ids) {
-    setSteps((prev) => prev.map((s) => (s.id === id ? { ...s, disabled: !s.disabled } : s)));
-  }
-
   /** Re-grabado en un clic (RF-06): el siguiente clic en la página reemplaza el selector. */
   async function handleRegrab(id: Ids) {
-    const step = steps.find((s) => s.id === id);
+    const step = findStepRec(steps, id);
     if (!step) return;
     setAppError(null);
     try {
@@ -771,7 +1335,7 @@ export function EditorProvider({ children }: { children: ReactNode }) {
         return;
       }
       setSteps((prev) =>
-        prev.map((s) => (s.id === id ? { ...s, selector: sel, label: describeStep({ ...s, selector: sel }) } : s)),
+        mapStepRec(prev, id, (s) => ({ ...s, selector: sel, label: describeStep({ ...s, selector: sel }) })),
       );
       await runOne({ ...step, selector: sel });
     } catch (err) {
@@ -952,7 +1516,12 @@ export function EditorProvider({ children }: { children: ReactNode }) {
           }
           const t0 = Date.now();
           try {
-            await openBrowser(doc.url || "about:blank", true, (doc.variables ?? []).map((v) => v.name));
+            await openBrowser({
+              url: doc.url || "about:blank",
+              headless: true,
+              variables: (doc.variables ?? []).map((v) => v.name),
+              browser: browserKind,
+            });
           } catch (err) {
             tests.push({
               name: doc.name || name,
@@ -967,48 +1536,24 @@ export function EditorProvider({ children }: { children: ReactNode }) {
             continue;
           }
           const vars = resolveVars(doc.variables ?? [], ENV_DEFAULT, {});
-          const records: RunRecord[] = [];
-          let f = 0;
-          for (const s of doc.steps ?? []) {
-            if (stopRef.current) {
-              stopped = true;
-              break;
-            }
-            if (pauseRef.current) await waitResume();
-            const base: RunRecord = {
-              index: records.length + 1,
-              action: s.action,
-              selector: s.selector,
-              value: s.value,
-              attribute: s.attribute,
-              status: "ok",
-            };
-            if (s.disabled) {
-              records.push({ ...base, status: "skipped" });
-              continue;
-            }
-            const r = await runOne(resolveStep(s, vars), s.id);
-            if (r) {
-              records.push({
-                ...base,
-                status: r.ok ? "ok" : "fail",
-                ms: r.ms,
-                error: r.error,
-                screenshot: r.screenshot,
-              });
-              if (!r.ok) f++;
-            }
-          }
+          const state: RunState = { records: [], ok: 0, fail: 0, skipped: 0, counter: 0, stopped: false };
+          // El set es una corrida headless en serie: sin "paso a paso" interno
+          // (la pausa manual entre tests se mantiene arriba).
+          await runStepList(doc.steps ?? [], vars, state, {
+            stepByStep: false,
+            sensitiveNames: (doc.variables ?? []).filter((v) => SENSITIVE_RE.test(v.name)).map((v) => v.name),
+          });
+          if (state.stopped) stopped = true;
           await closeBrowser();
           setBrowserOpen(false);
-          const testOk = f === 0 && !stopped;
+          const testOk = state.fail === 0 && !state.stopped;
           tests.push({
             name: doc.name || name,
             ok: testOk,
             ms: Date.now() - t0,
-            fail: f,
+            fail: state.fail,
             stopped,
-            steps: records,
+            steps: state.records,
           });
           if (!testOk) failTotal++;
         }
@@ -1047,7 +1592,7 @@ export function EditorProvider({ children }: { children: ReactNode }) {
         setAppError(`El set terminó pero el reporte no se guardó: ${String(err)}`);
       }
     },
-    [refreshReports, runOne],
+    [refreshReports, runOne, browserKind],
   );
 
   // ---- Variables, entornos y dataset (data-driven) ----
@@ -1117,22 +1662,23 @@ export function EditorProvider({ children }: { children: ReactNode }) {
     setNewEnvName("");
   }
 
-  function importCsv() {
+  /** Devuelve false si el texto no tiene cabecera ni filas; la página muestra el error. */
+  function importCsv(): boolean {
     const d = parseCsv(csvText);
     if (d.columns.length === 0 || d.rows.length === 0) {
-      setAppError("CSV inválido: necesita cabecera con nombres de variable y al menos una fila.");
       setDataset(null);
-      return;
+      return false;
     }
     setDataset(d);
     setDatasetReport(null);
     setAppError(null);
+    return true;
   }
 
   async function handleRunDataset() {
     if (!dataset || dataset.rows.length === 0) return;
     setRunningDataset(true);
-    const report: Array<{ ok: boolean; label: string }> = [];
+    const report: Array<{ ok: boolean; row: number; passed: number; total: number; stopped: boolean }> = [];
     for (let i = 0; i < dataset.rows.length; i++) {
       const row = dataset.rows[i];
       const over = { ...overrides };
@@ -1148,7 +1694,10 @@ export function EditorProvider({ children }: { children: ReactNode }) {
       });
       report.push({
         ok: res.failCount === 0 && !res.stopped,
-        label: `Fila ${i + 1} · ${res.okCount}/${res.total} ok${res.stopped ? " · detenida" : ""}`,
+        row: i + 1,
+        passed: res.okCount,
+        total: res.total,
+        stopped: !!res.stopped,
       });
       if (stopRef.current) break;
     }
@@ -1163,6 +1712,18 @@ export function EditorProvider({ children }: { children: ReactNode }) {
     browserOpen,
     headless,
     setHeadless,
+    browserKind,
+    setBrowserKind,
+    viewportKind,
+    setViewportKind,
+    timezoneId,
+    setTimezoneId,
+    geoEnabled,
+    setGeoEnabled,
+    geoLat,
+    setGeoLat,
+    geoLon,
+    setGeoLon,
     appError,
     setAppError,
     url,
@@ -1235,11 +1796,26 @@ export function EditorProvider({ children }: { children: ReactNode }) {
     handleOpen,
     handleClose,
     handleRestart,
+    tabs,
+    refreshTabs,
+    handleTabOpen,
+    handleTabSwitch,
+    handleTabClose,
+    savedSessions,
+    refreshSessions,
+    handleSaveSession,
+    handleLoadSession,
+    handleDeleteSession,
+    baselines,
+    refreshBaselines,
+    exporting,
+    handleExport,
     addStep,
     removeStep,
     startReplace,
     startEdit,
     saveEdit,
+    patchStep,
     duplicateStep,
     moveStep,
     togglePause,

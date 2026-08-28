@@ -1,3 +1,4 @@
+mod db;
 mod sidecar;
 mod storage;
 
@@ -11,6 +12,7 @@ pub fn run() {
 
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .manage(sidecar::SidecarState::default())
         .invoke_handler(tauri::generate_handler![
             sidecar::sidecar_request,
@@ -23,8 +25,17 @@ pub fn run() {
             storage::report_list,
             storage::report_delete,
             storage::report_path,
+            storage::baseline_list,
+            storage::export_save,
         ])
         .setup(|app| {
+            // Almacenamiento: SQLite (yatt.db) como fuente de verdad, con
+            // migración de los ficheros legacy y resincronización de espejos.
+            let db = db::Db::open(&db::project_root())?;
+            db.migrate()?;
+            db.resync()?;
+            app.manage(db);
+
             // El sidecar se arranca en segundo plano para no bloquear la UI.
             let handle = app.handle().clone();
             std::thread::spawn(move || {

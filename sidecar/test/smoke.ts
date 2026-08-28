@@ -10,13 +10,28 @@
  */
 
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
-import { writeFileSync } from "node:fs";
+import { existsSync, rmSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
+import { Database } from "bun:sqlite";
 
 // Logs por stderr (sin buffering) para seguir el progreso en vivo.
 console.log = (...a: unknown[]) => process.stderr.write(a.map(String).join(" ") + "\n");
 
 const cwd = resolve(import.meta.dir, "..");
+// Raíz de datos aislada del smoke: baselines/sesiones no tocan las del proyecto.
+const SMOKE_ROOT = resolve(cwd, ".smoke-data");
+const smokePath = (...parts: string[]) => resolve(SMOKE_ROOT, ...parts);
+
+/** ¿Existe la fila en la DB del sistema (yatt.db) del entorno smoke? */
+function dbHas(table: string, name: string): boolean {
+  const db = new Database(smokePath("yatt.db"));
+  try {
+    const row = db.query(`SELECT 1 FROM ${table} WHERE name = ?`).get(name);
+    return !!row;
+  } finally {
+    db.close();
+  }
+}
 
 interface Sidecar {
   req(method: string, params: any, timeoutMs?: number): Promise<any>;
@@ -25,7 +40,11 @@ interface Sidecar {
 }
 
 function spawnSidecar(): Sidecar {
-  const child = spawn("bun", ["run", "src/index.ts"], { cwd, stdio: ["pipe", "pipe", "inherit"] });
+  const child = spawn("bun", ["run", "src/index.ts"], {
+    cwd,
+    env: { ...process.env, YATT_ROOT: SMOKE_ROOT },
+    stdio: ["pipe", "pipe", "inherit"],
+  });
   let buf = "";
   const waiters: Record<number, (m: any) => void> = {};
   const events: any[] = [];
@@ -90,6 +109,8 @@ function makeAssert(section: string) {
 
 async function runSection(sec: Section) {
   console.log(`\n=== Sección: ${sec.name} ===`);
+  // Estado de datos limpio para cada sección (baselines/sesiones).
+  rmSync(SMOKE_ROOT, { recursive: true, force: true });
   const s = spawnSidecar();
   const assert = makeAssert(sec.name);
   try {
@@ -346,7 +367,152 @@ const vars: Section = {
   },
 };
 
-const SECTIONS: Section[] = [core, toolbar, preview, form, vars, grab];
+const condition: Section = {
+  name: "condition",
+  async run(s, assert) {
+    await s.req("open", {
+      url: "data:text/html,<div%20id='yes'>a</div>",
+      headless: true,
+    });
+
+    const exists = await s.req("condition", { selector: "#yes" });
+    assert(exists.ok === true && exists.result?.value === true, "condition: #yes existe");
+    const missing = await s.req("condition", { selector: "#no" });
+    assert(missing.result?.value === false, "condition: #no no existe");
+    const truthy = await s.req("condition", { value: "hola" });
+    assert(truthy.result?.value === true, "condition: valor no vacío = true");
+    const falsy = await s.req("condition", { value: "" });
+    assert(falsy.result?.value === false, "condition: valor vacío = false");
+    const falseLit = await s.req("condition", { value: "false" });
+    assert(falseLit.result?.value === false, "condition: 'false' = false");
+
+    await s.req("close", {});
+  },
+};
+
+const tabs: Section = {
+  name: "tabs",
+  async run(s, assert) {
+    await s.req("open", { url: URL, headless: true });
+
+    // Nueva pestaña con otra página; la activa pasa a ser la nueva.
+    const opened = await s.req("tab_open", { url: "data:text/html,<h1>otra</h1>" });
+    assert(opened.ok === true && opened.result?.tabs?.length === 2, "tab_open: 2 pestañas");
+    assert(opened.result.tabs[1].active === true, "la pestaña nueva es la activa");
+
+    const list = await s.req("tab_list", {});
+    assert(list.result.tabs.length === 2, "tab_list: 2 pestañas");
+
+    // Volver a la pestaña 0 y verificar la preview apunta a la primera página.
+    const switched = await s.req("tab_switch", { index: 0 });
+    assert(switched.result.tabs[0].active === true, "tab_switch a la pestaña 0");
+    const pv = await s.req("preview", {});
+    assert(String(pv.result?.url).includes("example.com"), "preview sigue a la pestaña activa");
+
+    // Cerrar la pestaña 1 (no activa).
+    const closed = await s.req("tab_close", { index: 1 });
+    assert(closed.result.tabs.length === 1, "tab_close: queda 1 pestaña");
+
+    // No se puede cerrar la única pestaña.
+    const only = await s.req("tab_close", {});
+    assert(only.ok === false, "no se puede cerrar la única pestaña");
+
+    // Cerrar pestaña sin índice cierra la activa (con 2 abiertas).
+    await s.req("tab_open", { url: "about:blank" });
+    const closeActive = await s.req("tab_close", {});
+    assert(closeActive.ok === true && closeActive.result.tabs.length === 1, "tab_close sin índice cierra la activa");
+
+    await s.req("close", {});
+  },
+};
+
+const visual: Section = {
+  name: "visual",
+  async run(s, assert) {
+    await s.req("open", { url: "data:text/html,<h1>pixel</h1>", headless: true });
+
+    // 1) Capturar la imagen base (espejo baselines/smoke-base.png + fila en DB).
+    const cap = await s.req("run_step", { step: { action: "capture_screenshot", value: "smoke-base" } });
+    assert(cap.ok === true, "capture_screenshot escribe la base");
+    assert(existsSync(smokePath("baselines", "smoke-base.png")), "archivo baselines/smoke-base.png existe");
+    assert(dbHas("baselines", "smoke-base"), "fila smoke-base en la DB");
+
+    // 2) Sin cambios: el assert pasa con tolerancia 0.
+    const same = await s.req("run_step", {
+      step: { action: "assert_screenshot", baseline: "smoke-base", tolerance: 0 },
+    });
+    assert(same.ok === true, "assert visual: sin cambios = ok");
+
+    // 3) Pintar el fondo: falla con tolerancia 0 (píxeles distintos).
+    await s.req("eval", { expression: "document.body.style.background = 'rgb(255,0,0)'" });
+    const diff = await s.req("run_step", {
+      step: { action: "assert_screenshot", baseline: "smoke-base", tolerance: 0 },
+    });
+    assert(diff.ok === false && String(diff.error).includes("píxeles"), "assert visual: fondo rojo = fallo (" + String(diff.error).slice(0, 60) + ")");
+
+    // 4) Con tolerancia generosa pasa de nuevo.
+    const tol = await s.req("run_step", {
+      step: { action: "assert_screenshot", baseline: "smoke-base", tolerance: 100 },
+    });
+    assert(tol.ok === true, "assert visual: tolerancia 100% pasa");
+
+    // 5) Imagen base inexistente → error claro.
+    const missing = await s.req("run_step", {
+      step: { action: "assert_screenshot", baseline: "no-existe" },
+    });
+    assert(missing.ok === false && String(missing.error).includes("no-existe"), "assert visual: base inexistente da error");
+
+    await s.req("close", {});
+  },
+};
+
+const session: Section = {
+  name: "session",
+  async run(s, assert) {
+    // Las cookies requieren un origen HTTP real (las URLs data: no persisten
+    // en storageState): usamos un servidor efímero local.
+    const http = await import("node:http");
+    const server = http.createServer((_req: any, res: any) => {
+      res.setHeader("content-type", "text/html");
+      res.end("<h1>sesion</h1>");
+    });
+    await new Promise<void>((r) => server.listen(0, "127.0.0.1", r));
+    const port = (server.address() as { port: number }).port;
+    const pageUrl = `http://127.0.0.1:${port}/`;
+
+    await s.req("open", { url: pageUrl, headless: true });
+    // Dejar una cookie en el contexto.
+    await s.req("eval", { expression: "document.cookie = 'yatt_smoke=1; path=/'" });
+    const check = await s.req("eval", { expression: "document.cookie" });
+    assert(String(check.result).includes("yatt_smoke=1"), "la cookie se escribió en la página");
+
+    const saved = await s.req("session_save", { name: "smoke-sess" });
+    assert(saved.ok === true, "session_save guarda el estado");
+    assert(dbHas("sessions", "smoke-sess"), "fila smoke-sess en la DB");
+
+    const list = await s.req("session_list", {});
+    assert(Array.isArray(list.result) && list.result.includes("smoke-sess"), "session_list incluye smoke-sess");
+
+    // Cerrar y reabrir cargando la sesión: la cookie debe sobrevivir.
+    await s.req("close", {});
+    const reopened = await s.req("open", { url: pageUrl, headless: true, session: "smoke-sess" });
+    assert(reopened.ok === true, "open con session carga el estado");
+    const cookies = await s.req("eval", { expression: "document.cookie" });
+    assert(String(cookies.result).includes("yatt_smoke=1"), "la cookie sobrevive al reinicio con sesión");
+
+    // Sesión inexistente: open no falla (arranca limpio).
+    const missing = await s.req("open", { url: "about:blank", headless: true, session: "nope" });
+    assert(missing.ok === true, "open con sesión inexistente arranca limpio");
+
+    const del = await s.req("session_delete", { name: "smoke-sess" });
+    assert(del.ok === true && !dbHas("sessions", "smoke-sess"), "session_delete borra la fila");
+
+    await s.req("close", {});
+    await new Promise<void>((r) => server.close(() => r()));
+  },
+};
+
+const SECTIONS: Section[] = [core, toolbar, preview, form, vars, grab, condition, tabs, visual, session];
 
 // Sección opcional (abre una ventana real en el display): se ejecuta solo si se
 // pide explícitamente, para no molestar en la suite por defecto.

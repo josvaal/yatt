@@ -372,6 +372,19 @@ export const HELPER_JS = `(function () {
     CTX.style.display = 'flex';
     var first = CTX.querySelector('.yatt-inp') || CTX.querySelector('.yatt-opt');
     if (first) { first.focus(); }
+    // RF-25: propuesta de valor esperado a partir del estado real del elemento
+    // (texto visible para assert_text, valor para assert_value).
+    var el = null;
+    try { el = document.querySelector(selector); } catch (e) {}
+    if (el) {
+      if (action === 'assert_text') {
+        var txt = (el.textContent || '').trim().slice(0, 300);
+        if (txt && first.classList.contains('yatt-inp') && !first.classList.contains('yatt-a1')) { first.value = txt; }
+      } else if (action === 'assert_value' && 'value' in el) {
+        var iv = String(el.value || '');
+        if (iv) { first.value = iv; }
+      }
+    }
     var varSel = CTX.querySelector('.yatt-var');
     if (varSel) {
       varSel.addEventListener('change', function (e) {

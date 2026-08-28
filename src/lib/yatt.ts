@@ -22,7 +22,17 @@ export type StepAction =
   | "assert_attribute"
   | "goto"
   | "wait"
-  | "screenshot";
+  | "screenshot"
+  // Fase 4
+  | "if"
+  | "repeat"
+  | "for_each"
+  | "run_flow"
+  | "open_tab"
+  | "switch_tab"
+  | "close_tab"
+  | "capture_screenshot"
+  | "assert_screenshot";
 
 export interface Step {
   id: string;
@@ -34,6 +44,35 @@ export interface Step {
   /** Paso pausado: se salta en la ejecución en serie. */
   disabled?: boolean;
   label?: string;
+  // ---- Fase 4: condicionales / bucles / sub-flujos / pestañas / asserts visuales ----
+
+  /** Rama verdadera de `if`, cuerpo de `repeat` o `for_each`. */
+  children?: Step[];
+  /** Rama alternativa de `if` (si no). */
+  elseChildren?: Step[];
+  /** Veces que se repite el cuerpo (repeat). */
+  times?: number;
+  /** Lista de `for_each`: valor literal separado por comas, o `{{variable}}`. */
+  list?: string;
+  /** Variable que toma el valor de cada item dentro del bucle. */
+  itemVar?: string;
+  /** Nombre del test guardado que actúa como sub-flujo (run_flow). */
+  flow?: string;
+  /** Mapeo variable del flujo → fuente en el test actual (run_flow). */
+  withVars?: Record<string, string>;
+  /** Nombre de la imagen base en baselines/ (assert/capture_screenshot). */
+  baseline?: string;
+  /** % de píxeles distintos permitidos (assert_screenshot), default 0. */
+  tolerance?: number;
+  /** Screenshot de la página completa (assert/capture_screenshot). */
+  fullPage?: boolean;
+}
+
+/** Acciones de bloque: contienen `children` y se resuelven en el runner. */
+export const CONTAINER_ACTIONS: StepAction[] = ["if", "repeat", "for_each", "run_flow"];
+
+export function isContainerStep(step: Step): boolean {
+  return CONTAINER_ACTIONS.includes(step.action);
 }
 
 export interface StepResult {
@@ -73,7 +112,16 @@ export const ACTION_LABELS: Record<StepAction, string> = {
   assert_attribute: "Verificar atributo",
   goto: "Ir a URL",
   wait: "Esperar",
-  screenshot: "Screenshot",
+  screenshot: "Captura de pantalla",
+  if: "Si (condición)",
+  repeat: "Repetir",
+  for_each: "Por cada",
+  run_flow: "Sub-flujo",
+  open_tab: "Abrir pestaña",
+  switch_tab: "Cambiar pestaña",
+  close_tab: "Cerrar pestaña",
+  capture_screenshot: "Guardar imagen de referencia",
+  assert_screenshot: "Verificar imagen",
 };
 
 let seq = 1;
@@ -85,11 +133,64 @@ export function request(method: string, params: Record<string, unknown> = {}) {
 }
 
 export const pingSidecar = () => request("ping", {});
-export const openBrowser = (url: string, headless: boolean, variables: string[] = []) =>
-  request("open", { url, headless, variables });
+
+export type BrowserKind = "chromium" | "firefox" | "webkit";
+export type ViewportPreset = "desktop" | "tablet" | "mobile";
+
+export interface OpenBrowserOptions {
+  url: string;
+  headless: boolean;
+  variables?: string[];
+  session?: string;
+  /** Motor (RF-27), default "chromium". */
+  browser?: BrowserKind;
+  /** Preset de viewport (RF-26). */
+  viewport?: { width: number; height: number };
+  /** Zona horaria simulada (RF-26). */
+  timezoneId?: string;
+  /** Geolocalización simulada (RF-26). */
+  geolocation?: { latitude: number; longitude: number } | null;
+}
+
+export const openBrowser = (options: OpenBrowserOptions) =>
+  request("open", {
+    url: options.url,
+    headless: options.headless,
+    variables: options.variables ?? [],
+    ...(options.session ? { session: options.session } : {}),
+    ...(options.browser && options.browser !== "chromium" ? { browser: options.browser } : {}),
+    ...(options.viewport ? { viewport: options.viewport } : {}),
+    ...(options.timezoneId ? { timezoneId: options.timezoneId } : {}),
+    ...(options.geolocation?.latitude !== undefined ? { geolocation: options.geolocation } : {}),
+  });
 export const closeBrowser = () => request("close", {});
 export const runStep = (step: Step, timeoutMs?: number) =>
   request("run_step", { step, ...(timeoutMs && timeoutMs > 0 ? { timeoutMs } : {}) });
+
+/** Evalúa una condición de `if` en la página actual (RFC-18). */
+export const evalCondition = (selector?: string, value?: string) =>
+  request("condition", { selector, value }) as Promise<{ value: boolean }>;
+
+// ---- Multi-pestaña (RF-22) ----
+
+export interface TabInfo {
+  index: number;
+  active: boolean;
+  title: string;
+  url: string;
+}
+
+export const tabOpen = (url: string) => request("tab_open", { url }) as Promise<{ tabs: TabInfo[] }>;
+export const tabList = () => request("tab_list", {}) as Promise<TabInfo[]>;
+export const tabSwitch = (index: number) => request("tab_switch", { index }) as Promise<{ tabs: TabInfo[] }>;
+export const tabClose = (index?: number) =>
+  request("tab_close", index === undefined ? {} : { index }) as Promise<{ tabs: TabInfo[] }>;
+
+// ---- Sesión / estado (RF-23) ----
+
+export const saveSession = (name: string) => request("session_save", { name });
+export const listSessions = () => request("session_list", {}) as Promise<string[]>;
+export const deleteSession = (name: string) => request("session_delete", { name });
 
 /** Actualiza en vivo las variables disponibles en la barra flotante de la página. */
 export const toolbarVars = (variables: string[]) => request("toolbar_vars", { variables });
@@ -147,6 +248,12 @@ export const reportPath = (name: string) => invoke<string>("report_path", { name
 /** Abre un archivo (reporte HTML) con la app del sistema. */
 export const openReport = (path: string) => openPath(path);
 
+// ---- Fase 4: baselines (RF-20) y export a Playwright (RF-24) ----
+
+export const baselineList = () => invoke<string[]>("baseline_list", {});
+export const exportPlaywright = (name: string, content: string) =>
+  invoke<string>("export_save", { name, content });
+
 export function defaultTest(
   name: string,
   url: string,
@@ -169,5 +276,26 @@ export function defaultTest(
 
 export function describeStep(step: Step): string {
   const target = step.selector ? ` · ${step.selector}` : "";
-  return `${ACTION_LABELS[step.action]}${step.value !== undefined ? ` "${step.value}"` : ""}${target}`;
+  switch (step.action) {
+    case "if":
+      return `Si (${step.selector ? "existe " + step.selector : (step.value ?? "condición")})${(step.children?.length ?? 0) > 0 ? ` · ${step.children!.length} pasos` : ""}${(step.elseChildren?.length ?? 0) > 0 ? ` (+si no: ${step.elseChildren!.length})` : ""}`;
+    case "repeat":
+      return `Repetir ×${step.times ?? 0} · ${(step.children?.length ?? 0)} pasos`;
+    case "for_each":
+      return `Por cada ${step.itemVar ?? "?"} de ${step.list ?? "…"} · ${(step.children?.length ?? 0)} pasos`;
+    case "run_flow":
+      return `Sub-flujo "${step.flow ?? "?"}"`;
+    case "open_tab":
+      return `Abrir pestaña "${step.value ?? ""}"`;
+    case "switch_tab":
+      return `Cambiar a pestaña ${step.value ?? ""}`;
+    case "close_tab":
+      return step.value ? `Cerrar pestaña ${step.value}` : "Cerrar pestaña actual";
+    case "capture_screenshot":
+      return `Capturar imagen base ${step.value ?? ""}${step.fullPage ? " (página completa)" : ""}`;
+    case "assert_screenshot":
+      return `Verificar imagen ${step.baseline ?? step.value ?? ""}${step.tolerance ? ` (tol ${step.tolerance}%)` : ""}${step.fullPage ? " (página completa)" : ""}`;
+    default:
+      return `${ACTION_LABELS[step.action]}${step.value !== undefined ? ` "${step.value}"` : ""}${target}`;
+  }
 }

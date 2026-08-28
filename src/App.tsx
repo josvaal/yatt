@@ -4,6 +4,7 @@ import { AppSidebar, TopBar } from "@/components/app-shell";
 import { Button } from "@/components/ui/button";
 import { SidebarProvider } from "@/components/ui/sidebar";
 import { EditorProvider, useEditor } from "@/editor/context";
+import { I18nProvider } from "@/lib/i18n";
 import { DatasetPage } from "@/pages/data";
 import { EditorPage } from "@/pages/editor";
 import { ReportsPage } from "@/pages/reports";
@@ -24,7 +25,7 @@ function Shell() {
             <div className="flex items-center justify-between gap-3 border-b border-destructive/30 bg-destructive/10 px-6 py-2 text-sm text-destructive">
               <span className="flex min-w-0 items-center gap-2">
                 <AlertCircle className="size-4 shrink-0" />
-                <span className="truncate">{appError}</span>
+                <span className="truncate" title={appError}>{appError}</span>
               </span>
               <Button
                 variant="ghost"
@@ -52,8 +53,10 @@ function Shell() {
 
 export default function App() {
   return (
-    <EditorProvider>
-      <Shell />
-    </EditorProvider>
+    <I18nProvider>
+      <EditorProvider>
+        <Shell />
+      </EditorProvider>
+    </I18nProvider>
   );
 }

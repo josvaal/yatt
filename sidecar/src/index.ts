@@ -13,18 +13,71 @@
  */
 
 import { createInterface } from "node:readline/promises";
-import { chromium, type Browser, type BrowserContext, type CDPSession, type Page } from "playwright";
-import { HELPER_JS, type Step } from "./interaction.ts";
+import { existsSync, mkdirSync, readdirSync, unlinkSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+import {
+  chromium,
+  firefox,
+  webkit,
+  type Browser,
+  type BrowserContext,
+  type CDPSession,
+  type Page,
+} from "playwright";
+import { HELPER_JS } from "./interaction.ts";
+import {
+  executeLeaf,
+  evalConditionOn,
+  getDb,
+  sanitizeName,
+  sessionsDir,
+  type Step,
+} from "./engine.ts";
 
 let browser: Browser | null = null;
 let context: BrowserContext | null = null;
 let page: Page | null = null;
 let interactionOn = false;
+/** Motor (RF-27): chromium (default), firefox o webkit. */
+let engineName = "chromium";
 
 // Nombres de variables del editor: se inyectan en la barra flotante para poder
 // insertar {{nombre}} al grabar un valor, y se actualizan en vivo con
 // `toolbar_vars` sin reabrir el navegador.
 let toolbarVars: string[] = [];
+
+// ---- Multi-pestaña (RF-22): `page` es la pestaña activa; el contexto puede
+// tener varias (pestañas abiertas por YATT o pop-ups de la app bajo prueba). ----
+
+function allPages(): Page[] {
+  return context ? context.pages().filter((p) => !p.isClosed()) : [];
+}
+
+function currentPage(): Page | null {
+  if (page && !page.isClosed()) return page;
+  const ps = allPages();
+  return ps.length > 0 ? ps[ps.length - 1] : null;
+}
+
+async function tabsPayload() {
+  return Promise.all(
+    allPages().map(async (p, idx) => ({
+      index: idx,
+      active: p === page,
+      title: await p.title().catch(() => ""),
+      url: p.url(),
+    })),
+  );
+}
+
+/** Publica el estado de pestañas (nuevas, cerradas, conmutadas) a la UI. */
+function refreshTabs() {
+  tabsPayload()
+    .then((tabs) => emit("tabs_changed", { tabs }))
+    .catch(() => {
+      /* contexto cerrado a mitad de camino */
+    });
+}
 
 // Sincronización ventana → viewport (solo modo visible): cuando el usuario
 // redimensiona la ventana de Chromium, el layout de la página debe seguirlo.
@@ -61,146 +114,76 @@ function stepLabel(step: Step): string {
   return `${step.action}${step.value !== undefined ? ` "${step.value}"` : ""}${target}`;
 }
 
+/** Ejecuta un paso hoja sobre la pestaña activa. El comportamiento vive en el
+ *  engine compartido (engine.ts): el mismo código corre en el CLI (RF-28). */
 async function executeStep(step: Step, p: Page, withScreenshot: boolean) {
-  const t0 = Date.now();
-  const fail = async (err: unknown) => {
-    let screenshot: string | null = null;
-    if (withScreenshot) {
-      try {
-        screenshot = (await p.screenshot({ type: "png" })).toString("base64");
-      } catch {
-        screenshot = null;
-      }
-    }
-    const msg = err instanceof Error ? err.message.split("\n")[0] : String(err);
-    return { ok: false, error: msg, ms: Date.now() - t0, ...(screenshot ? { screenshot } : {}) };
-  };
-
-  try {
-    switch (step.action) {
-      case "click":
-        await p.locator(step.selector!).click({ timeout: 5000 });
-        break;
-      case "dblclick":
-        await p.locator(step.selector!).dblclick({ timeout: 5000 });
-        break;
-      case "hover":
-        await p.locator(step.selector!).hover({ timeout: 5000 });
-        break;
-      case "type":
-        await p.locator(step.selector!).fill(step.value ?? "", { timeout: 5000 });
-        break;
-      case "clear":
-        await p.locator(step.selector!).clear({ timeout: 5000 });
-        break;
-      case "upload": {
-        const path = step.value ?? "";
-        if (!path) throw new Error("upload: falta la ruta del archivo (usa una variable tipo 'archivo' con {{nombre}})");
-        await p.locator(step.selector!).setInputFiles(path, { timeout: 5000 });
-        break;
-      }
-      case "select_option":
-        try {
-          await p.locator(step.selector!).selectOption(step.value ?? "", { timeout: 5000 });
-        } catch {
-          // Fallback: interpretar el valor capturado como texto visible de la opción.
-          await p.locator(step.selector!).selectOption({ label: step.value ?? "" }, { timeout: 5000 });
-        }
-        break;
-      case "check":
-        await p.locator(step.selector!).check({ timeout: 5000 });
-        break;
-      case "press_key":
-        if (step.selector) {
-          await p.locator(step.selector).press(step.value ?? "Enter", { timeout: 5000 });
-        } else {
-          await p.keyboard.press(step.value ?? "Enter");
-        }
-        break;
-      case "wait_visible":
-        await p.locator(step.selector!).waitFor({ state: "visible", timeout: 10000 });
-        break;
-      case "scroll_to_element": {
-        // Scroll determinista: sincroniza en el momento y verifica el resultado,
-        // sin la espera de "reposo" de scrollIntoViewIfNeeded (frágil).
-        const inView = await p
-          .locator(step.selector!)
-          .evaluate((el: Element) => {
-            el.scrollIntoView({ block: "center", inline: "nearest" });
-            const r = el.getBoundingClientRect();
-            const vh = window.innerHeight || document.documentElement.clientHeight;
-            return r.top >= 0 && r.bottom <= vh && r.width > 0;
-          })
-          .catch(() => false);
-        if (!inView) throw new Error(`scroll al elemento: no se pudo llevar a la vista (${step.selector})`);
-        break;
-      }
-      case "assert_visible": {
-        const visible = await p.locator(step.selector!).isVisible().catch(() => false);
-        if (!visible) throw new Error(`assert visible: el elemento no está visible (${step.selector})`);
-        break;
-      }
-      case "assert_hidden": {
-        const visible = await p.locator(step.selector!).isVisible().catch(() => false);
-        if (visible) throw new Error(`assert oculto: el elemento está visible (${step.selector})`);
-        break;
-      }
-      case "assert_text": {
-        const text = (await p.locator(step.selector!).textContent({ timeout: 5000 }).catch(() => "")) ?? "";
-        if (!text.includes(step.value ?? "")) {
-          throw new Error(`assert texto: se esperaba "${step.value}" pero el texto es "${text.trim().slice(0, 60)}"`);
-        }
-        break;
-      }
-      case "assert_value": {
-        const val = await p.locator(step.selector!).inputValue({ timeout: 5000 }).catch(() => "");
-        if (val !== step.value) {
-          throw new Error(`assert valor: se esperaba "${step.value}" pero el valor es "${val}"`);
-        }
-        break;
-      }
-      case "assert_attribute": {
-        const attr = await p
-          .locator(step.selector!)
-          .getAttribute(step.attribute ?? "", { timeout: 5000 })
-          .catch(() => null);
-        if (attr !== step.value) {
-          throw new Error(`assert atributo ${step.attribute ?? "?"}: se esperaba "${step.value}" pero es "${attr ?? "(sin atributo)"}"`);
-        }
-        break;
-      }
-      case "goto":
-        await p.goto(step.value || "about:blank", { waitUntil: "domcontentloaded", timeout: 30000 });
-        break;
-      case "wait":
-        await p.waitForTimeout(Math.max(0, Number(step.value) || 500));
-        break;
-      case "screenshot":
-        return { ok: true, ms: Date.now() - t0, screenshot: (await p.screenshot({ type: "png" })).toString("base64") };
-      default:
-        return await fail(new Error("acción desconocida: " + step.action));
-    }
-    return { ok: true, ms: Date.now() - t0 };
-  } catch (err) {
-    return await fail(err);
-  }
+  return executeLeaf(p, step, { screenshotOnError: withScreenshot }, {
+    context,
+    getCurrent: currentPage,
+    setCurrent: (np) => {
+      page = np;
+    },
+    afterTabs: refreshTabs,
+    onNewPage: (np) => {
+      void exposePageBindings(np);
+    },
+  });
 }
 
 /**
- * Registra el helper como init script: Playwright lo ejecuta al inicio de cada
- * navegación del frame principal, sin carreras de addScriptTag (evita el error
- * "execution context was destroyed" en páginas que redirigen). El segundo
+ * Registra el helper como init script del CONTEXTO: Playwright lo ejecuta al
+ * inicio de cada navegación de cada página (pestañas y popups), sin carreras de
+ * addScriptTag (evita el error "execution context was destroyed"). El segundo
  * script solo propaga la lista de variables, que se re-registra al cambiarla.
  */
-function registerToolbarInit(p: Page) {
-  p.addInitScript((vars: string[]) => {
-    (window as any).__yattVars = vars;
-  }, toolbarVars).catch(() => {
+function registerToolbarInit() {
+  if (!context) return;
+  context
+    .addInitScript((vars: string[]) => {
+      (window as any).__yattVars = vars;
+    }, toolbarVars)
+    .catch(() => {
+      /* registración best-effort; no debe fallar */
+    });
+  context.addInitScript({ content: HELPER_JS }).catch(() => {
     /* registración best-effort; no debe fallar */
   });
-  p.addInitScript({ content: HELPER_JS }).catch(() => {
-    /* registración best-effort; no debe fallar */
-  });
+}
+
+/** Bindings por página: el canal desde la página bajo prueba hacia el sidecar.
+ *  Se registran por página (no a nivel de contexto) para saber QUÉ pestaña
+ *  grabó la acción cuando hay varias. Debe completarse antes de evaluar código
+ *  en la página (si no, el primer __yattRecord puede no estar registrado aún). */
+function exposePageBindings(p: Page) {
+  if ((p as any).__yattBoundPromise) return (p as any).__yattBoundPromise as Promise<void>;
+  const prom = (async () => {
+    await Promise.all([
+      p.exposeFunction("__yattRecord", async (step: unknown) => {
+        const s = step as Step;
+        const r = await executeStep(s, p, true);
+        emit("action_captured", {
+          step: { ...s, label: s.label ?? stepLabel(s) },
+          result: { ok: r.ok, error: r.error, ms: r.ms },
+        });
+        return { ok: r.ok, error: r.error };
+      }),
+      // Selector capturado en modo re-grabado (start_grab); se publica como evento.
+      p.exposeFunction("__yattGrabResult", (sel: unknown) => {
+        emit("grab_result", { selector: String(sel ?? "") });
+      }),
+    ]).catch(() => {
+      /* registración best-effort: si falla, la pestaña no graba pero no tira el sidecar */
+    });
+  })();
+  (p as any).__yattBoundPromise = prom;
+  return prom;
+}
+
+/** Hook de cierre de una pestaña: publica la lista actualizada de pestañas. */
+function hookPageLifecycle(p: Page) {
+  if ((p as any).__yattHooked) return;
+  (p as any).__yattHooked = true;
+  p.on("close", () => refreshTabs());
 }
 
 /**
@@ -263,29 +246,71 @@ function stopResizeSync() {
   appliedOuterH = 0;
 }
 
-async function openBrowser(params: { url?: string; headless?: boolean; viewport?: { width: number; height: number }; variables?: string[] }) {
+const ENGINE_LAUNCHERS: Record<string, { launch: typeof chromium.launch; label: string }> = {
+  chromium: { launch: chromium.launch.bind(chromium), label: "chromium" },
+  firefox: { launch: firefox.launch.bind(firefox), label: "firefox" },
+  webkit: { launch: webkit.launch.bind(webkit), label: "webkit" },
+};
+
+async function openBrowser(params: {
+  url?: string;
+  headless?: boolean;
+  viewport?: { width: number; height: number };
+  variables?: string[];
+  session?: string;
+  browser?: string;
+  timezoneId?: string;
+  geolocation?: { latitude: number; longitude: number } | null;
+}) {
   await closeBrowser();
   toolbarVars = Array.isArray(params.variables) ? params.variables.map(String) : [];
-  browser = await chromium.launch({ headless: params.headless ?? false });
+  engineName = params.browser && params.browser in ENGINE_LAUNCHERS ? params.browser : "chromium";
+  browser = await ENGINE_LAUNCHERS[engineName].launch({ headless: params.headless ?? false });
+  // Sesión (RF-23): la fuente de verdad es la DB (yatt.db); fallback al fichero
+  // legacy sessions/<name>.json pre-migración o si la DB no está disponible.
+  const sname = params.session ? sanitizeName(String(params.session)) : "";
+  let storageState: string | { cookies: unknown[]; origins: unknown[] } | undefined;
+  if (sname) {
+    const db = await getDb();
+    if (db) {
+      const row = db.get("SELECT storage_state FROM sessions WHERE name = ?", [sname]);
+      if (row && row.storage_state) {
+        try {
+          storageState = JSON.parse(String(row.storage_state));
+        } catch {
+          storageState = undefined;
+        }
+      }
+    }
+    if (storageState === undefined) {
+      const statePath = join(sessionsDir(), `${sname}.json`);
+      if (existsSync(statePath)) storageState = statePath; // Playwright acepta ruta o estado
+    }
+  }
   context = await browser.newContext({
     viewport: params.viewport ?? { width: 1280, height: 800 },
+    ...(storageState ? { storageState } : {}),
+    // Entorno simulado (RF-26): zona horaria y geolocalización.
+    ...(params.timezoneId ? { timezoneId: params.timezoneId } : {}),
+    ...(params.geolocation && typeof params.geolocation.latitude === "number"
+      ? { geolocation: params.geolocation, permissions: ["geolocation"] as string[] }
+      : {}),
   });
+
+  // El helper como init script del contexto: presente en cada navegación de
+  // TODAS las pestañas y popups que abra la app bajo prueba (RF-22).
+  registerToolbarInit();
+
+  // Cada página nueva (pestaña o popup) recibe bindings y avisa de su cierre.
+  context.on("page", (p) => {
+    void exposePageBindings(p).then(() => {
+      hookPageLifecycle(p);
+      refreshTabs();
+    });
+  });
+
   page = await context.newPage();
-
-  // El helper como init script: presente en cada navegación del frame principal.
-  registerToolbarInit(page);
-
-  // El canal desde la página: __yattRecord(step) → se ejecuta y se publica el evento.
-  await page.exposeFunction("__yattRecord", async (step: unknown) => {
-    const s = step as Step;
-    const r = await executeStep(s, page!, true);
-    emit("action_captured", { step: { ...s, label: s.label ?? stepLabel(s) }, result: { ok: r.ok, error: r.error, ms: r.ms } });
-    return { ok: r.ok, error: r.error };
-  });
-  // Selector capturado en modo re-grabado (start_grab); se publica como evento.
-  await page.exposeFunction("__yattGrabResult", (sel: unknown) => {
-    emit("grab_result", { selector: String(sel ?? "") });
-  });
+  await exposePageBindings(page);
 
   interactionOn = true;
   if (params.url) {
@@ -294,10 +319,12 @@ async function openBrowser(params: { url?: string; headless?: boolean; viewport?
     // Sin URL: fuerza una navegación mínima para que corran los init scripts.
     await page.goto("about:blank", { waitUntil: "domcontentloaded" });
   }
-  if (!params.headless) {
+  // La sincronización de ventana visible usa CDP (solo Chromium).
+  if (!params.headless && engineName === "chromium") {
     startResizeSync(page);
   }
-  emit("browser_status", { open: true, headless: params.headless ?? false, url: params.url ?? "" });
+  refreshTabs();
+  emit("browser_status", { open: true, headless: params.headless ?? false, browser: engineName, url: params.url ?? "" });
 }
 
 async function closeBrowser() {
@@ -349,6 +376,21 @@ function withTimeout<T>(p: Promise<T>, ms: number, label: string): Promise<T> {
   ]);
 }
 
+/**
+ * Convierte el error de un launch fallido en texto plano legible. Playwright
+ * devuelve carteles ASCII con bordes de caja ("launch: ╔════…║ Host system is
+ * missing dependencies…╚════"); aquí se quita el arte ASCII y el prefijo
+ * "launch:", para que el banner de la UI muestre la causa real en una línea.
+ */
+function humanErrorMessage(err: unknown): string {
+  const raw = err instanceof Error ? err.message : String(err);
+  const lines = raw
+    .split("\n")
+    .map((l) => l.trim().replace(/^║\s*/, "").replace(/\s*║$/, ""))
+    .filter((l) => l && !/^[╔╗╚╝═\s]+$/.test(l));
+  return lines.join(" ").replace(/^(browserType\.)?launch:\s*/i, "") || "error desconocido";
+}
+
 async function handleRequest(id: number, method: string, params: Record<string, unknown>) {
   try {
     switch (method) {
@@ -356,7 +398,16 @@ async function handleRequest(id: number, method: string, params: Record<string, 
         respond(id, true, { result: { ok: true, pid: process.pid } });
         break;
       case "open":
-        await openBrowser(params as { url?: string; headless?: boolean; viewport?: { width: number; height: number }; variables?: string[] });
+        await openBrowser(params as {
+          url?: string;
+          headless?: boolean;
+          viewport?: { width: number; height: number };
+          variables?: string[];
+          session?: string;
+          browser?: string;
+          timezoneId?: string;
+          geolocation?: { latitude: number; longitude: number } | null;
+        });
         respond(id, true, { result: { open: true } });
         break;
       case "close":
@@ -364,49 +415,54 @@ async function handleRequest(id: number, method: string, params: Record<string, 
         respond(id, true, { result: { open: false } });
         break;
       case "run_step": {
-        if (!page) {
+        const p = currentPage();
+        if (!p) {
           respond(id, false, { error: "el navegador no está abierto (ejecuta 'open' primero)" });
           return;
         }
         const step = params.step as Step;
         const timeoutMs = Number(params.timeoutMs) > 0 ? Number(params.timeoutMs) : 40000;
-        const r = await withTimeout(executeStep(step, page, true), timeoutMs, "ejecución del paso");
+        const r = await withTimeout(executeStep(step, p, true), timeoutMs, "ejecución del paso");
         respond(id, r.ok, r.ok ? { result: r } : { error: r.error, result: r });
         break;
       }
       case "eval": {
-        if (!page) {
+        const p = currentPage();
+        if (!p) {
           respond(id, false, { error: "el navegador no está abierto (ejecuta 'open' primero)" });
           return;
         }
-        const r = await withTimeout(page.evaluate(String(params.expression ?? "")), 8000, "evaluate de eval");
+        const r = await withTimeout(p.evaluate(String(params.expression ?? "")), 8000, "evaluate de eval");
         respond(id, true, { result: r });
         break;
       }
       case "preview": {
-        if (!page) {
+        const p = currentPage();
+        if (!p) {
           respond(id, false, { error: "el navegador no está abierto (ejecuta 'open' primero)" });
           return;
         }
-        respond(id, true, { result: await previewPayload(page) });
+        respond(id, true, { result: await previewPayload(p) });
         break;
       }
       case "scroll_by": {
-        if (!page) {
+        const p = currentPage();
+        if (!p) {
           respond(id, false, { error: "el navegador no está abierto" });
           return;
         }
-        await page.mouse.wheel(Number(params.dx ?? 0), Number(params.dy ?? 0));
+        await p.mouse.wheel(Number(params.dx ?? 0), Number(params.dy ?? 0));
         await new Promise((r) => setTimeout(r, 80));
-        respond(id, true, { result: await previewPayload(page) });
+        respond(id, true, { result: await previewPayload(p) });
         break;
       }
       case "scroll_to": {
-        if (!page) {
+        const p = currentPage();
+        if (!p) {
           respond(id, false, { error: "el navegador no está abierto" });
           return;
         }
-        await page.evaluate(
+        await p.evaluate(
           ([px, py]) => {
             const sx = Math.max(0, Math.min(px, document.documentElement.scrollWidth - window.innerWidth));
             const sy = Math.max(0, Math.min(py, document.documentElement.scrollHeight - window.innerHeight));
@@ -415,28 +471,30 @@ async function handleRequest(id: number, method: string, params: Record<string, 
           [Number(params.x ?? 0), Number(params.y ?? 0)],
         );
         await new Promise((r) => setTimeout(r, 80));
-        respond(id, true, { result: await previewPayload(page) });
+        respond(id, true, { result: await previewPayload(p) });
         break;
       }
       case "click_at": {
-        if (!page) {
+        const p = currentPage();
+        if (!p) {
           respond(id, false, { error: "el navegador no está abierto" });
           return;
         }
-        await page.mouse.click(Number(params.x ?? 0), Number(params.y ?? 0));
+        await p.mouse.click(Number(params.x ?? 0), Number(params.y ?? 0));
         await new Promise((r) => setTimeout(r, 120));
-        respond(id, true, { result: await previewPayload(page) });
+        respond(id, true, { result: await previewPayload(p) });
         break;
       }
       case "start_grab": {
-        if (!page) {
+        const p = currentPage();
+        if (!p) {
           respond(id, false, { error: "el navegador no está abierto" });
           return;
         }
-        // El binding __yattGrabResult se registra una sola vez en openBrowser
+        // El binding __yattGrabResult se registra una sola vez por página
         // (Playwright lo re-aplica tras cada navegación).
         await withTimeout(
-          page.evaluate(() => {
+          p.evaluate(() => {
             (globalThis as any).__yattGrab = true;
             if ((globalThis as any).__yattSetStatus) {
               (globalThis as any).__yattSetStatus("re-grabando: clic en el elemento (Esc cancela)", "warn");
@@ -460,9 +518,10 @@ async function handleRequest(id: number, method: string, params: Record<string, 
               /* registración best-effort */
             });
         }
-        if (page) {
+        if (currentPage()) {
+          const p = currentPage()!;
           await withTimeout(
-            page.evaluate((list: string[]) => {
+            p.evaluate((list: string[]) => {
               if ((globalThis as any).__yattSetVars) {
                 (globalThis as any).__yattSetVars(list);
               } else {
@@ -479,16 +538,18 @@ async function handleRequest(id: number, method: string, params: Record<string, 
         break;
       }
       case "window_sync_now": {
-        if (!page) {
+        const p = currentPage();
+        if (!p) {
           respond(id, false, { error: "el navegador no está abierto" });
           return;
         }
-        await syncVisibleWindow(page);
-        respond(id, true, { result: await previewPayload(page) });
+        await syncVisibleWindow(p);
+        respond(id, true, { result: await previewPayload(p) });
         break;
       }
       case "window_resize": {
-        if (!page || !cdp) {
+        const p = currentPage();
+        if (!p || !cdp) {
           respond(id, false, { error: "el navegador visible no está disponible" });
           return;
         }
@@ -503,24 +564,154 @@ async function handleRequest(id: number, method: string, params: Record<string, 
             },
           });
           await new Promise((r) => setTimeout(r, 400));
-          await syncVisibleWindow(page); // registra el nuevo tamaño
+          await syncVisibleWindow(p); // registra el nuevo tamaño
           await new Promise((r) => setTimeout(r, 450));
-          await syncVisibleWindow(page); // aplica el viewport tras asentarse
-          respond(id, true, { result: await previewPayload(page) });
+          await syncVisibleWindow(p); // aplica el viewport tras asentarse
+          respond(id, true, { result: await previewPayload(p) });
         } catch (e) {
           respond(id, false, { error: String(e) });
         }
         break;
       }
       case "status":
-        respond(id, true, { result: { open: !!browser, url: page ? page.url() : null, interaction: interactionOn } });
+        respond(id, true, {
+          result: { open: !!browser, browser: engineName, url: currentPage()?.url() ?? null, interaction: interactionOn },
+        });
         break;
+
+      // ---- Multi-pestaña (RF-22) ----
+      case "tab_open": {
+        const c = context;
+        if (!c) {
+          respond(id, false, { error: "el navegador no está abierto" });
+          return;
+        }
+        const np = await c.newPage();
+        await exposePageBindings(np);
+        page = np;
+        const url = String(params.url ?? "");
+        await np.goto(url || "about:blank", { waitUntil: "domcontentloaded", timeout: 30000 });
+        refreshTabs();
+        respond(id, true, { result: { tabs: await tabsPayload() } });
+        break;
+      }
+      case "tab_list": {
+        if (!context) {
+          respond(id, false, { error: "el navegador no está abierto" });
+          return;
+        }
+        respond(id, true, { result: { tabs: await tabsPayload() } });
+        break;
+      }
+      case "tab_switch": {
+        const ps = allPages();
+        const idx = Number(params.index);
+        if (!Number.isInteger(idx) || idx < 0 || idx >= ps.length) {
+          respond(id, false, { error: `índice de pestaña ${idx} inválido (hay ${ps.length})` });
+          return;
+        }
+        page = ps[idx];
+        refreshTabs();
+        respond(id, true, { result: { tabs: await tabsPayload() } });
+        break;
+      }
+      case "tab_close": {
+        const ps = allPages();
+        if (ps.length <= 1) {
+          respond(id, false, { error: "no se puede cerrar la única pestaña" });
+          return;
+        }
+        const idx = params.index === undefined ? ps.indexOf(page!) : Number(params.index);
+        const target = ps[idx];
+        if (!target) {
+          respond(id, false, { error: `índice de pestaña ${idx} inválido (hay ${ps.length})` });
+          return;
+        }
+        if (page === target) {
+          page = ps.filter((x) => x !== target).pop() ?? null;
+        }
+        await withTimeout(target.close(), 5000, "cierre de pestaña").catch(() => {});
+        refreshTabs();
+        respond(id, true, { result: { tabs: await tabsPayload() } });
+        break;
+      }
+
+      // ---- Condición de `if` (RF-18): existe el elemento, o valor no vacío ----
+      case "condition": {
+        const p = currentPage();
+        if (!p) {
+          respond(id, false, { error: "el navegador no está abierto" });
+          return;
+        }
+        const value = await evalConditionOn(
+          p,
+          String(params.selector ?? ""),
+          String(params.value ?? ""),
+        );
+        respond(id, true, { result: { value } });
+        break;
+      }
+
+      // ---- Estado de sesión (RF-23): cookies + localStorage ----
+      case "session_save": {
+        const c = context;
+        if (!c) {
+          respond(id, false, { error: "el navegador no está abierto" });
+          return;
+        }
+        const name = sanitizeName(String(params.name ?? ""));
+        if (!name) {
+          respond(id, false, { error: "falta el nombre de la sesión" });
+          return;
+        }
+        const db = await getDb();
+        const state = await c.storageState();
+        if (db) {
+          db.run(
+            "INSERT OR REPLACE INTO sessions (name, storage_state, updated_at) VALUES (?, ?, ?)",
+            [name, JSON.stringify(state), Date.now()],
+          );
+        } else {
+          // Legado (sin DB): fichero en sessions/.
+          mkdirSync(sessionsDir(), { recursive: true });
+          writeFileSync(join(sessionsDir(), `${name}.json`), JSON.stringify(state, null, 2));
+        }
+        respond(id, true, { result: { ok: true, name } });
+        break;
+      }
+      case "session_list": {
+        let names: string[] = [];
+        const db = await getDb();
+        if (db) {
+          names = (db.all("SELECT name FROM sessions ORDER BY name") as { name: unknown }[]).map(
+            (r) => String(r.name),
+          );
+        } else if (existsSync(sessionsDir())) {
+          names = readdirSync(sessionsDir())
+            .filter((f) => f.endsWith(".json"))
+            .map((f) => f.replace(/\.json$/, ""))
+            .sort();
+        }
+        respond(id, true, { result: names });
+        break;
+      }
+      case "session_delete": {
+        const name = sanitizeName(String(params.name ?? ""));
+        const db = await getDb();
+        if (db) {
+          db.run("DELETE FROM sessions WHERE name = ?", [name]);
+        } else {
+          const path = join(sessionsDir(), `${name}.json`);
+          if (existsSync(path)) unlinkSync(path);
+        }
+        respond(id, true, { result: { ok: true } });
+        break;
+      }
       default:
         respond(id, false, { error: "método desconocido: " + method });
     }
   } catch (err) {
-    const msg = err instanceof Error ? err.message.split("\n")[0] : String(err);
-    respond(id, false, { error: msg });
+    respond(id, false, { error: humanErrorMessage(err) });
   }
 }
 

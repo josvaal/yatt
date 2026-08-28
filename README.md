@@ -61,8 +61,12 @@ YATT_DEBUG=1 bun tauri dev
 - **Dataset · data-driven**: pega un CSV (cabecera = variables) y "Ejecutar con
   dataset" corre el test una vez por fila, con reporte ✓/✗ por fila. Guardado en
   el archivo del test.
-- **Guardar / cargar / borrar**: tests como `<nombre>.yatt.json` en `tests/`
-  (esquema `schemaVersion: 1`, incluye steps, variables, entornos y dataset).
+- **Guardar / cargar / borrar**: almacenamiento del sistema en **SQLite**
+  (`yatt.db` en la raíz, WAL) como fuente de verdad para tests, reportes,
+  imágenes base y sesiones; los ficheros `tests/<nombre>.yatt.json`,
+  `reports/*` y `baselines/*.png` se mantienen como **espejo automático**
+  (git, CLI y "abrir con el SO" siguen funcionando). Esquema
+  `schemaVersion: 1`, incluye steps, variables, entornos y dataset.
 
 ## Verificación automatizada
 
@@ -81,10 +85,12 @@ un formulario real: type/select/check/clear/press_key/asserts/scroll) y
 
 ```
 sidecar/src/index.ts        sidecar JSON-RPC + Playwright + watchdogs (open/run_step/preview/start_grab…)
+sidecar/src/db.ts           acceso a SQLite (bun:sqlite / node:sqlite) con el esquema del sistema
 sidecar/src/interaction.ts  helper inyectado en la página (barra de acciones RF-04 + selectores)
 sidecar/test/smoke.ts       smoke test por secciones aisladas
 src-tauri/src/sidecar.rs    spawn/kill del sidecar + puente JSON-RPC + eventos
-src-tauri/src/storage.rs    guardar/listar/cargar/borrar tests JSON
+src-tauri/src/db.rs         yatt.db (SQLite WAL): conexión, migración de legacy y espejos
+src-tauri/src/storage.rs    comandos Tauri sobre SQLite (tests/reports/baselines/exports)
 src/lib/yatt.ts             cliente del bridge desde la UI (tipos + invoke)
 src/App.tsx                 editor: pasos editables, navegador, preview, resultado, persistencia
 ```
@@ -92,3 +98,25 @@ src/App.tsx                 editor: pasos editables, navegador, preview, resulta
 Nota de despliegue: en este prototipo el sidecar se lanza con `bun run
 sidecar/src/index.ts` desde Rust. En un build empaquetado se sustituirá por un
 binario sidecar registrado en Tauri (fase de distribución del `ROADMAP.md`).
+
+## Solución de problemas
+
+**El motor WebKit no abre ("missing dependencies to run browsers").** El
+binario de WebKit que empaqueta Playwright necesita librerías del sistema que
+en Arch/CachyOS no vienen por defecto (Playwright solo documenta Debian/Ubuntu,
+y el sidecar antes mostraba solo "launch:" — el mensaje completo se agregó en
+`sidecar/src/index.ts`). En Arch:
+
+```bash
+sudo pacman -S --needed flite libbacktrace libwpe wpebackend-fdo wpewebkit
+# El bundle de Playwright espera sonames más antiguos que los de Arch:
+sudo ln -sf /usr/lib/libicuuc.so.78  /usr/lib/libicuuc.so.74
+sudo ln -sf /usr/lib/libicui18n.so.78 /usr/lib/libicui18n.so.74
+sudo ln -sf /usr/lib/libicudata.so.78 /usr/lib/libicudata.so.74
+sudo ln -sf /usr/lib/libjxl.so.0.12   /usr/lib/libjxl.so.0.8
+sudo ln -sf /usr/lib/libxml2.so.16   /usr/lib/libxml2.so.2
+```
+
+Los números de soname de Arch cambian con cada actualización de `icu`,
+`libjxl` o `libxml2`; si vuelve a fallar, ajusta los targets de los symlinks a
+la versión actual (`ls /usr/lib/libicu*.so.*`).

@@ -33,9 +33,13 @@ impl Default for SidecarState {
 /// Lanza el proceso sidecar (bun o node) con cwd en `sidecar/`, de modo que
 /// pueda importar playwright. En un build empaquetado esto se sustituirá por un
 /// binario sidecar registrado en Tauri (phase de distribución).
+///
+/// `YATT_ROOT` apunta a la raíz del proyecto: el sidecar guarda ahí sus
+/// baselines/ y sesiones/ (misma raíz que tests/ y reports/ del frontend).
 fn spawn_child() -> Result<(Child, ChildStdin, ChildStdout), String> {
     let base = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..").join("sidecar");
     let script = base.join("src").join("index.ts");
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..");
 
     let mut candidates: Vec<(String, Vec<String>)> = Vec::new();
     if let Ok(bin) = std::env::var("YATT_SIDECAR") {
@@ -50,6 +54,7 @@ fn spawn_child() -> Result<(Child, ChildStdin, ChildStdout), String> {
         let mut cmd = Command::new(&bin);
         cmd.args(&args)
             .current_dir(&base)
+            .env("YATT_ROOT", &root)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit());

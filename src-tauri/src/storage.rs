@@ -1,18 +1,18 @@
+use crate::db::{project_root, Db};
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use tauri::State;
 
-/// Raíz del proyecto (el directorio padre de src-tauri): los tests y reportes
-/// viven aquí, portables y versionables con Git, y FUERA del árbol de
-/// `src-tauri` que vigila `tauri dev` (si no, guardar o borrar un archivo
-/// disparaba recompilación y reinicio de la app).
-fn project_root() -> PathBuf {
-    let here = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    here.parent().unwrap_or(&here).to_path_buf()
-}
-
-/// Los tests viven como `tests/<nombre>.yatt.json` en la raíz del proyecto.
+/// Los tests se guardan en la DB (fuente de verdad) y se espejan como
+/// `tests/<nombre>.yatt.json` en la raíz del proyecto: portables y
+/// versionables con Git, y fuera del árbol que vigila `tauri dev`.
 fn tests_dir() -> PathBuf {
     project_root().join("tests")
+}
+
+/// Los reportes de corrida: fila en la DB + espejo `reports/<nombre>.html|.json`.
+fn reports_dir() -> PathBuf {
+    project_root().join("reports")
 }
 
 fn sanitize(name: &str) -> Result<String, String> {
@@ -26,95 +26,95 @@ fn sanitize(name: &str) -> Result<String, String> {
     Ok(trimmed.to_string())
 }
 
+fn write_mirror(dir: &Path, filename: &str, bytes: &[u8]) -> Result<PathBuf, String> {
+    fs::create_dir_all(dir).map_err(|e| format!("creando carpeta {}: {e}", dir.display()))?;
+    let path = dir.join(filename);
+    fs::write(&path, bytes).map_err(|e| format!("guardando {filename}: {e}"))?;
+    Ok(path)
+}
+
+fn remove_mirror(dir: &Path, filename: &str) {
+    let _ = fs::remove_file(dir.join(filename));
+}
+
 #[tauri::command]
-pub fn test_save(name: String, content: String) -> Result<(), String> {
+pub fn test_save(db: State<'_, Db>, name: String, content: String) -> Result<(), String> {
     let name = sanitize(&name)?;
-    let dir = tests_dir();
-    fs::create_dir_all(&dir).map_err(|e| format!("creando carpeta tests: {e}"))?;
-    let path = dir.join(format!("{name}.yatt.json"));
-    fs::write(&path, content).map_err(|e| format!("guardando {name}: {e}"))?;
+    db.upsert_entry("tests", "content", &name, &content)?;
+    write_mirror(&tests_dir(), &format!("{name}.yatt.json"), content.as_bytes())?;
     Ok(())
 }
 
 #[tauri::command]
-pub fn test_list() -> Result<Vec<String>, String> {
-    let dir = tests_dir();
-    if !dir.exists() {
-        return Ok(vec![]);
-    }
-    let mut out = vec![];
-    for entry in fs::read_dir(&dir).map_err(|e| format!("leyendo carpeta tests: {e}"))? {
-        let entry = entry.map_err(|e| e.to_string())?;
-        let name = entry.file_name().to_string_lossy().to_string();
-        if name.ends_with(".yatt.json") {
-            out.push(name.trim_end_matches(".yatt.json").to_string());
-        }
-    }
-    out.sort();
-    Ok(out)
+pub fn test_list(db: State<'_, Db>) -> Result<Vec<String>, String> {
+    db.select_names("tests")
 }
 
 #[tauri::command]
-pub fn test_load(name: String) -> Result<String, String> {
+pub fn test_load(db: State<'_, Db>, name: String) -> Result<String, String> {
     let name = sanitize(&name)?;
-    let path = tests_dir().join(format!("{name}.yatt.json"));
-    fs::read_to_string(&path).map_err(|e| format!("leyendo {name}: {e}"))
+    db.select_text("tests", "content", &name)?
+        .ok_or_else(|| format!("el test {name} no existe"))
 }
 
 #[tauri::command]
-pub fn test_delete(name: String) -> Result<(), String> {
+pub fn test_delete(db: State<'_, Db>, name: String) -> Result<(), String> {
     let name = sanitize(&name)?;
-    let path = tests_dir().join(format!("{name}.yatt.json"));
-    fs::remove_file(path).map_err(|e| format!("borrando {name}: {e}"))
-}
-
-/// Los reportes de corrida viven como `reports/<nombre>.html|.json`
-/// en la raíz del proyecto.
-fn reports_dir() -> PathBuf {
-    project_root().join("reports")
+    db.delete_row("tests", &name)?;
+    remove_mirror(&tests_dir(), &format!("{name}.yatt.json"));
+    Ok(())
 }
 
 #[tauri::command]
-pub fn report_save(name: String, content: String) -> Result<String, String> {
+pub fn report_save(db: State<'_, Db>, name: String, content: String) -> Result<String, String> {
     let name = sanitize(&name)?;
-    let dir = reports_dir();
-    fs::create_dir_all(&dir).map_err(|e| format!("creando carpeta reports: {e}"))?;
-    let path = dir.join(&name);
-    fs::write(&path, &content).map_err(|e| format!("guardando {name}: {e}"))?;
+    db.upsert_entry("reports", "content", &name, &content)?;
+    let path = write_mirror(&reports_dir(), &name, content.as_bytes())?;
     Ok(path.to_string_lossy().to_string())
 }
 
 #[tauri::command]
-pub fn report_list() -> Result<Vec<String>, String> {
-    let dir = reports_dir();
-    if !dir.exists() {
-        return Ok(vec![]);
-    }
-    let mut out = vec![];
-    for entry in fs::read_dir(&dir).map_err(|e| format!("leyendo carpeta reports: {e}"))? {
-        let entry = entry.map_err(|e| e.to_string())?;
-        let name = entry.file_name().to_string_lossy().to_string();
-        if name.ends_with(".html") || name.ends_with(".json") {
-            out.push(name);
-        }
-    }
-    out.sort();
-    Ok(out)
+pub fn report_list(db: State<'_, Db>) -> Result<Vec<String>, String> {
+    db.select_names("reports")
 }
 
 #[tauri::command]
-pub fn report_delete(name: String) -> Result<(), String> {
+pub fn report_delete(db: State<'_, Db>, name: String) -> Result<(), String> {
     let name = sanitize(&name)?;
-    let path = reports_dir().join(name);
-    fs::remove_file(path).map_err(|e| format!("borrando reporte: {e}"))
+    db.delete_row("reports", &name)?;
+    remove_mirror(&reports_dir(), &name);
+    Ok(())
 }
 
+/// Ruta del reporte para abrirlo con el SO: materializa el espejo si falta.
 #[tauri::command]
-pub fn report_path(name: String) -> Result<String, String> {
+pub fn report_path(db: State<'_, Db>, name: String) -> Result<String, String> {
     let name = sanitize(&name)?;
+    let content = db
+        .select_text("reports", "content", &name)?
+        .ok_or_else(|| format!("el reporte {name} no existe"))?;
     let path = reports_dir().join(&name);
     if !path.exists() {
-        return Err(format!("el reporte {name} no existe"));
+        write_mirror(&reports_dir(), &name, content.as_bytes())?;
     }
+    Ok(path.to_string_lossy().to_string())
+}
+
+/// Imágenes base de asserts visuales (RF-20): BLOB en la DB que escribe el
+/// sidecar (mismo `yatt.db` vía YATT_ROOT) + espejo `baselines/<nombre>.png`.
+#[tauri::command]
+pub fn baseline_list(db: State<'_, Db>) -> Result<Vec<String>, String> {
+    db.select_names("baselines")
+}
+
+/// Export de un test a código Playwright (RF-24): `exports/<nombre>.spec.ts`.
+/// Es un artefacto portátil, así que sigue siendo solo fichero.
+#[tauri::command]
+pub fn export_save(name: String, content: String) -> Result<String, String> {
+    let name = sanitize(&name)?;
+    let dir = project_root().join("exports");
+    fs::create_dir_all(&dir).map_err(|e| format!("creando carpeta exports: {e}"))?;
+    let path = dir.join(&name);
+    fs::write(&path, &content).map_err(|e| format!("guardando {name}: {e}"))?;
     Ok(path.to_string_lossy().to_string())
 }

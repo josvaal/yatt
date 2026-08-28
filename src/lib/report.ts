@@ -12,6 +12,10 @@ export interface RunRecord {
   ms?: number;
   error?: string;
   screenshot?: string;
+  /** Nivel de anidamiento en el reporte (bloques Fase 4). */
+  depth?: number;
+  /** Resumen de un paso de bloque (condición, iteraciones, sub-flujo). */
+  summary?: string;
 }
 
 export interface SetTestResult {
@@ -83,12 +87,14 @@ const STATUS_META: Record<RunStatus, { label: string; cls: string }> = {
 function recordRow(rec: RunRecord): string {
   const meta = STATUS_META[rec.status];
   const label = ACTION_LABELS[rec.action] ?? rec.action;
+  const indent = rec.depth ? ` style="margin-left:${Math.min(rec.depth, 6) * 22}px"` : "";
   return `
-  <div class="row ${rec.status}">
+  <div class="row ${rec.status}"${indent}>
     <span class="num">${rec.index}</span>
     <div class="body">
       <div class="line">
         <span class="label">${esc(label)}</span>
+        ${rec.summary ? `<span class="sum">${esc(rec.summary)}</span>` : ""}
         ${rec.value !== undefined ? `<span class="val">“${esc(rec.value)}”</span>` : ""}
         ${rec.selector ? `<span class="sel">${esc(rec.selector)}</span>` : ""}
         ${rec.attribute ? `<span class="attr">[${esc(rec.attribute)}]</span>` : ""}
@@ -168,6 +174,7 @@ export function buildReportHtml(r: RunReport): string {
   .row .line { display: flex; flex-wrap: wrap; gap: 4px 10px; align-items: baseline; }
   .row .label { font-weight: 600; }
   .row .val, .row .sel, .row .attr { font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 12.5px; color: #9fd0ff; }
+  .row .sum { color: #9aa3b2; font-size: 12px; }
   .row .time { font-size: 11.5px; color: #7a8292; margin-top: 2px; }
   .err { margin: 8px 0 0; padding: 8px 10px; background: rgba(248, 113, 113, 0.08); border: 1px solid rgba(248, 113, 113, 0.25); border-radius: 8px; color: #fca5a5; font: 12px ui-monospace, Menlo, Consolas, monospace; white-space: pre-wrap; overflow-wrap: anywhere; }
   .row img { max-width: 100%; margin-top: 8px; border: 1px solid #2a2f3a; border-radius: 8px; }
