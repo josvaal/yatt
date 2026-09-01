@@ -101,7 +101,7 @@ function recordRow(rec: RunRecord): string {
       </div>
       <div class="time">${fmtMs(rec.ms)}</div>
       ${rec.error ? `<pre class="err">${esc(rec.error)}</pre>` : ""}
-      ${rec.screenshot ? `<img src="data:image/png;base64,${rec.screenshot}" alt="Evidencia del fallo" />` : ""}
+      ${rec.screenshot ? `<img src="data:image/png;base64,${rec.screenshot}" alt="Evidencia del paso" />` : ""}
     </div>
     <span class="chip ${meta.cls}">${meta.label}</span>
   </div>`;

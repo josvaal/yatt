@@ -918,7 +918,7 @@ export function EditorProvider({ children }: { children: ReactNode }) {
       if (r) {
         if (r.ok) {
           state.ok++;
-          state.records.push({ ...base, status: "ok", ms: r.ms });
+          state.records.push({ ...base, status: "ok", ms: r.ms, screenshot: r.screenshot });
         } else {
           state.fail++;
           state.records.push({

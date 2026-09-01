@@ -51,10 +51,10 @@
 1. El usuario crea un test en YATT; el frontend pide a Rust lanzar el browser.
 2. Rust arranca el sidecar Node y le ordena abrir Chromium en la URL inicial (visible o headless).
 3. El usuario señala elementos sobre la página; la UI muestra la barra de acciones y crea pasos con el selector capturado por el sidecar.
-4. Cada paso nuevo se envía al sidecar para ejecutarse al instante; el resultado (OK/fail + screenshot si falla) vuelve a la UI.
+4. Cada paso nuevo se envía al sidecar para ejecutarse al instante; el resultado (OK/fail + screenshot de evidencia) vuelve a la UI.
 5. Al guardar, Rust serializa el test a `*.yatt.json` (schemaVersion, steps, variables, entornos, config del navegador).
 6. Para correr un set: el runner itera los tests, el sidecar ejecuta la secuencia de pasos en headless y devuelve resultados; Rust genera el reporte (JSON + HTML) con evidencia.
-7. Si un paso falla en una corrida, el reporte guarda screenshot + error; en el editor, el usuario re-graba el selector y revalida en un clic.
+7. Si un paso falla en una corrida, el reporte guarda screenshot + error (y en los pasos ok, screenshot de evidencia); en el editor, el usuario re-graba el selector y revalida en un clic.
 
 ## Stack tecnológico propuesto
 

@@ -135,7 +135,7 @@ function buildHtml(out: RunOutcome, meta: Record<string, string>): string {
         <div class="line"><span class="label">${esc(r.action)}</span>${r.summary ? `<span class="sum">${esc(r.summary)}</span>` : ""}${r.value !== undefined ? `<span class="val">“${esc(r.value)}”</span>` : ""}${r.selector ? `<span class="sel">${esc(r.selector)}</span>` : ""}</div>
         <div class="time">${r.ms ?? "—"} ms</div>
         ${r.error ? `<pre class="err">${esc(r.error)}</pre>` : ""}
-        ${r.screenshot ? `<img src="data:image/png;base64,${r.screenshot}" alt="Evidencia del fallo" />` : ""}
+        ${r.screenshot ? `<img src="data:image/png;base64,${r.screenshot}" alt="Evidencia del paso" />` : ""}
       </div>
       <span class="chip ${chip[0]}">${chip[1]}</span>
     </div>`;

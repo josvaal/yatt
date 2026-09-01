@@ -28,7 +28,7 @@
 ### Runner y reportes
 
 - **RF-15** (MVP) — El usuario puede correr un test individual o un set completo en modo headless, con timeout configurable por paso y global.
-- **RF-16** (MVP) — El runner produce un reporte: por paso (pasado/fallado, duración, screenshot en fallo), resumen del set y ruta de evidencia; exportable a HTML.
+- **RF-16** (MVP) — El runner produce un reporte: por paso (pasado/fallado, duración, screenshot por paso), resumen del set y ruta de evidencia; exportable a HTML.
 - **RF-17** (MVP) — En modo visible, la ejecución se puede pausar/reanudar y seguir paso a paso.
 
 ### Robustez (Alta)
@@ -72,4 +72,4 @@
 - Todos los pasos del test se validan en el momento de crearse; cualquier fallo se corrige sin salir del editor.
 - El test guardado es un JSON legible y versionable, y se puede abrir/ejecutar de nuevo desde otra máquina.
 - Un test parametrizado con variables se ejecuta con dos juegos de datos distintos sin modificar los pasos.
-- El runner headless produce un reporte con estado por paso y screenshot del fallo.
+- El runner headless produce un reporte con estado por paso y screenshot de evidencia por paso.

@@ -117,7 +117,7 @@ function stepLabel(step: Step): string {
 /** Ejecuta un paso hoja sobre la pestaña activa. El comportamiento vive en el
  *  engine compartido (engine.ts): el mismo código corre en el CLI (RF-28). */
 async function executeStep(step: Step, p: Page, withScreenshot: boolean) {
-  return executeLeaf(p, step, { screenshotOnError: withScreenshot }, {
+  return executeLeaf(p, step, { screenshot: withScreenshot }, {
     context,
     getCurrent: currentPage,
     setCurrent: (np) => {

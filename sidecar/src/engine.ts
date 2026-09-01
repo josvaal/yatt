@@ -116,17 +116,17 @@ export async function evalConditionOn(p: Page, selector?: string, value?: string
 }
 
 /** Ejecuta una acción hoja sobre la página y devuelve el resultado (con
- *  screenshot de evidencia en caso de fallo cuando se pide). */
+ *  screenshot de evidencia del estado tras el paso, ok o fallo, cuando se pide). */
 export async function executeLeaf(
   p: Page,
   step: Step,
-  opts: { screenshotOnError?: boolean },
+  opts: { screenshot?: boolean },
   ctx: LeafContext,
 ): Promise<StepResult> {
   const t0 = Date.now();
   const fail = async (err: unknown) => {
     let screenshot: string | null = null;
-    if (opts.screenshotOnError) {
+    if (opts.screenshot) {
       try {
         screenshot = (await p.screenshot({ type: "png" })).toString("base64");
       } catch {
@@ -328,6 +328,15 @@ export async function executeLeaf(
       }
       default:
         return await fail(new Error("acción desconocida: " + step.action));
+    }
+    // Evidencia: estado de la página tras un paso exitoso (opcional; si la
+    // captura falla, el paso sigue contando como ok).
+    if (opts.screenshot) {
+      try {
+        return { ok: true, ms: Date.now() - t0, screenshot: (await p.screenshot({ type: "png" })).toString("base64") };
+      } catch {
+        /* screenshot opcional: no debe tumbar el paso */
+      }
     }
     return { ok: true, ms: Date.now() - t0 };
   } catch (err) {
@@ -548,11 +557,12 @@ export async function runTestSteps(
         continue;
       }
 
-      // Hoja: ejecutar contra la pestaña activa.
-      const r = await withTimeout(executeLeaf(holder.page, resolved, { screenshotOnError: true }, leafCtx), timeoutMs, "ejecución del paso");
+      // Hoja: ejecutar contra la pestaña activa, con screenshot de evidencia
+      // tanto en paso ok como en fallo.
+      const r = await withTimeout(executeLeaf(holder.page, resolved, { screenshot: true }, leafCtx), timeoutMs, "ejecución del paso");
       if (r.ok) {
         state.ok++;
-        state.records.push({ ...base, status: "ok", ms: r.ms });
+        state.records.push({ ...base, status: "ok", ms: r.ms, screenshot: r.screenshot });
       } else {
         state.fail++;
         state.records.push({ ...base, status: "fail", ms: r.ms, error: r.error, screenshot: r.screenshot });
