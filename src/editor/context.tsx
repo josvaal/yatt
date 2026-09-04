@@ -51,6 +51,7 @@ import {
   type TestFile,
   type ViewportPreset,
 } from "@/lib/yatt";
+import { parseImportedTest } from "@/lib/import";
 import {
   ENV_DEFAULT,
   interpolate,
@@ -373,6 +374,7 @@ interface EditorContextValue {
   handleSave: () => Promise<void>;
   handleLoad: (name: string) => Promise<void>;
   handleDelete: (name: string) => Promise<void>;
+  handleImportFile: (content: string, baseName: string) => Promise<void>;
   newTest: () => void;
 
   // variables
@@ -1383,6 +1385,37 @@ export function EditorProvider({ children }: { children: ReactNode }) {
     }
   }
 
+  /** Importa un test desde un archivo .yatt.json: lo valida, lo guarda en la biblioteca y lo abre en el editor. */
+  async function handleImportFile(content: string, baseName: string) {
+    setAppError(null);
+    try {
+      let doc = parseImportedTest(content, baseName);
+      const existing = new Set(savedTests);
+      if (existing.has(doc.name)) {
+        let n = 2;
+        while (existing.has(`${doc.name} (${n})`)) n++;
+        doc = { ...doc, name: `${doc.name} (${n})` };
+      }
+      await saveTest(doc.name, JSON.stringify(doc, null, 2));
+      await refreshSaved();
+      setSteps(doc.steps);
+      setStatus({});
+      setLastResult(null);
+      setUrl(doc.url || "https://example.com");
+      setTestName(doc.name);
+      setVariables(doc.variables ?? []);
+      setEnvs(doc.envs?.length ? doc.envs : ["dev", "prod"]);
+      setDataset(doc.dataset ?? null);
+      setDatasetReport(null);
+      setOverrides({});
+      setCsvText("");
+      setActiveEnv(ENV_DEFAULT);
+      setPage("editor");
+    } catch (err) {
+      setAppError(`No se pudo importar: ${String(err)}`);
+    }
+  }
+
   async function handleDelete(name: string) {
     try {
       await deleteTest(name);
@@ -1823,6 +1856,7 @@ export function EditorProvider({ children }: { children: ReactNode }) {
     handleSave,
     handleLoad,
     handleDelete,
+    handleImportFile,
     newTest,
     addVariable,
     removeVariable,

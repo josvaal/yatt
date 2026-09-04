@@ -7,6 +7,18 @@ Node). Tests guardados como JSON.
 Estado actual: **Fase 2 completada — variables, entornos y data-driven** (ver
 `ROADMAP.md` y `PRODUCT.md`).
 
+## Integración con IA (MCP)
+
+YATT incluye un **servidor MCP** (`mcp/`) para que un asistente de IA gestione
+tests, corra suites headless y controle un navegador en vivo viendo screenshots —
+100 % local. ~34 tools, recursos y prompts; manual y configs en
+[`mcp/README.md`](mcp/README.md):
+
+```bash
+cd mcp && bun install
+bun run mcp/src/server.ts [--http] [--root /ruta/al/repo]
+```
+
 ## Cómo correrlo
 
 ```bash

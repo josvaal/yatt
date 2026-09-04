@@ -1,9 +1,10 @@
-import { useEffect, useState } from "react";
+import { type ChangeEvent, useEffect, useRef, useState } from "react";
 import {
   Braces,
   Check,
   ChevronDown,
   CloudDownload,
+  FileInput,
   FileJson,
   FilePlus2,
   FileText,
@@ -139,8 +140,26 @@ function ThemeToggle() {
 
 /** Menú desplegable con las operaciones sobre tests guardados. */
 function TestsMenu() {
-  const { steps, newTest, handleSave, handleLoad, handleDelete, savedTests } = useEditor();
+  const { steps, newTest, handleSave, handleLoad, handleDelete, handleImportFile, savedTests } =
+    useEditor();
   const { t } = useI18n();
+  const fileRef = useRef<HTMLInputElement>(null);
+  const [importing, setImporting] = useState(false);
+
+  async function handleFileChange(e: ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0];
+    e.target.value = "";
+    if (!file) return;
+    setImporting(true);
+    try {
+      await handleImportFile(await file.text(), file.name);
+    } catch {
+      // los errores ya se muestran en el banner de la app (handleImportFile)
+    } finally {
+      setImporting(false);
+    }
+  }
+
   return (
     <DropdownMenu>
       <DropdownMenuTrigger render={<Button variant="outline" size="sm" className="gap-1.5" />}>
@@ -152,9 +171,20 @@ function TestsMenu() {
         <DropdownMenuItem onClick={newTest}>
           <FilePlus2 className="size-4" /> {t("topbar.newTest")}
         </DropdownMenuItem>
+        <DropdownMenuItem onClick={() => fileRef.current?.click()} disabled={importing}>
+          {importing ? <Loader2 className="size-4 animate-spin" /> : <FileInput className="size-4" />}
+          {importing ? t("topbar.importing") : t("topbar.importTest")}
+        </DropdownMenuItem>
         <DropdownMenuItem onClick={handleSave} disabled={steps.length === 0}>
           <Save className="size-4" /> {t("topbar.saveTest")}
         </DropdownMenuItem>
+        <input
+          ref={fileRef}
+          type="file"
+          accept=".yatt.json,.json,application/json"
+          className="sr-only"
+          onChange={handleFileChange}
+        />
         <DropdownMenuSeparator />
         {savedTests.length === 0 ? (
           <DropdownMenuLabel>{t("topbar.noTests")}</DropdownMenuLabel>
