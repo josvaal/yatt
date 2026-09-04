@@ -1,4 +1,12 @@
+<div align="center">
+
+<img src="./assets/logo_yatt.png" alt="Logo de YATT" width="160" />
+
 # YATT — Yet Another Testing Tool
+
+<img src="./assets/banner_yatt.jpg" alt="Banner de YATT" width="720" />
+
+</div>
 
 Testing de UI **interactivo**: apuntas las acciones sobre un Chromium real y el test
 se construye y valida paso a paso, sin escribir código. Motor: Playwright (sidecar

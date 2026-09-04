@@ -51,6 +51,7 @@ import { useEditor, type PageId } from "@/editor/context";
 import { useI18n } from "@/lib/i18n";
 import { ENV_DEFAULT } from "@/lib/vars";
 import { cn } from "@/lib/utils";
+import logoUrl from "@/assets/logo_yatt.png";
 
 /** Navegación agrupada por actividad: construir el test y probarlo. */
 const NAV_GROUPS: Array<{
@@ -83,11 +84,14 @@ export function AppSidebar() {
   return (
     <Sidebar>
       <SidebarHeader>
-        {!collapsed && (
-          <span className="px-1 text-[13px] font-semibold tracking-[0.22em] text-foreground">
-            YATT
-          </span>
-        )}
+        <div className={cn("flex items-center gap-2", collapsed && "justify-center")}>
+          <img src={logoUrl} alt="YATT" className="size-6 shrink-0 rounded-md" />
+          {!collapsed && (
+            <span className="text-[13px] font-semibold tracking-[0.22em] text-foreground">
+              YATT
+            </span>
+          )}
+        </div>
       </SidebarHeader>
       <SidebarContent className="gap-5">
         {NAV_GROUPS.map((group) => (
