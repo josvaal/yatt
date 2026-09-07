@@ -37,3 +37,11 @@ yatt.db-wal
 /portable
 portable
 
+# YATT build artifacts
+# Paquete portable con los binarios compilados (yatt.exe + yatt-sidecar.exe)
+/portable
+# Hosts de Node para el SEA del sidecar + bundle/blob intermedios (~200 MB)
+/sidecar/sea/
+# Datos runtime del smoke test del sidecar
+/sidecar/.smoke-data/
+

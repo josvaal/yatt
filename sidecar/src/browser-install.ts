@@ -18,9 +18,12 @@ type ProgressFn = (name: string, data: Record<string, unknown>) => void;
  * `open headless:true` necesita ambos descargados.
  */
 const ENGINE_EXECUTABLES: Record<string, Array<() => string>> = {
-  chromium: [chromium.executablePath],
-  firefox: [firefox.executablePath],
-  webkit: [webkit.executablePath],
+  // BINDEADOS: guardando la referencia sin `.bind()` el `this` se pierde al
+  // invocarla y playwright lanza "Cannot read properties of undefined
+  // (reading '_initializer')" → el check fallaba siempre → reinstalaba.
+  chromium: [chromium.executablePath.bind(chromium)],
+  firefox: [firefox.executablePath.bind(firefox)],
+  webkit: [webkit.executablePath.bind(webkit)],
 };
 
 /** True si el motor dado tiene TODOS sus ejecutables descargados. */
@@ -30,7 +33,13 @@ export function browserInstalled(engine: string): boolean {
   return paths.every((p) => {
     try {
       return existsSync(p());
-    } catch {
+    } catch (err) {
+      // Si la resolución interna lanza (registry roto en el bundle), NO hay
+      // que enmudecerlo: sin este log sería invisible y reinstalaría siempre.
+      console.error(
+        `[yatt] browserInstalled(${engine}): resolución de ejecutable falló:`,
+        err instanceof Error ? err.message : String(err),
+      );
       return false;
     }
   });
@@ -52,13 +61,37 @@ export async function ensureBrowser(
     );
   }
   emit("browser_install_started", { engine });
+  // `registry.install()` es el camino del CLI (`npx playwright install`):
+  // lock + descarga + marker. En cambio `installBrowsersForNpmInstall` usa el
+  // mecanismo `.links` de npm: registra el paquete instalador y al validar la
+  // caché BORRA como "stale" todo navegador cuyo link no resuelva. En un exe
+  // standalone el link apunta a rutas del paquete que no existen → borraba e
+  // reinstalaba el navegador en cada corrida.
+  //
+  //registry.install() también corre esa GC al empezar; el escape oficial es
+  // PLAYWRIGHT_SKIP_BROWSER_GC. Sin esto, en la máquina del usuario el
+  // navegador se descargaba una y otra vez en cada reinicio de la app.
+  process.env.PLAYWRIGHT_SKIP_BROWSER_GC = "1";
+  // coreBundle exporta el namespace `registry`; la INSTANCIA viva del
+  // registro (findExecutable/install) está en `registry.registry`.
   const bundle = (await import("playwright-core/lib/coreBundle")) as unknown as {
     registry: {
-      installBrowsersForNpmInstall: (browsers: string[]) => Promise<void>;
+      registry: {
+        findExecutable: (name: string) => unknown;
+        install: (executables: unknown[]) => Promise<void>;
+      };
     };
   };
+  const registry = bundle.registry.registry;
+  const executables = ["chromium", "chromium-headless-shell"]
+    .map((name) => registry.findExecutable(name))
+    .filter(Boolean);
+  if (executables.length === 0) {
+    emit("browser_install_failed", { engine, error: "registry sin ejecutables chromium" });
+    throw new Error("El registro de Playwright no expone el navegador chromium.");
+  }
   try {
-    await bundle.registry.installBrowsersForNpmInstall(["chromium", "chromium-headless-shell"]);
+    await registry.install(executables);
   } catch (err) {
     emit("browser_install_failed", {
       engine,

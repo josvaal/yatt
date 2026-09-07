@@ -21,7 +21,7 @@
  *   bun run scripts/build-sidecar.ts --target bun-windows-x64 --outfile ../dist/yatt-sidecar.exe
  */
 
-import { readFileSync, writeFileSync, copyFileSync, existsSync } from "node:fs";
+import { readFileSync, writeFileSync, copyFileSync, existsSync, mkdirSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -140,12 +140,75 @@ function patchInProcessDownload(path: string, source: string): string {
   return source.slice(0, start) + replacement + source.slice(end);
 }
 
+/**
+ * P4: transporte WebSocket en vez de pipe para Chromium.
+ *
+ * Playwright 1.62 lanza Chromium con `--remote-debugging-pipe` y habla con él
+ * por los file descriptors 3/4 heredados. El runtime embebido de bun no pasa
+ * esos fds extra a procesos hijos en Windows: Chrome arranca, nunca recibe el
+ * canal CDP, y el launch termina en "Timeout 180000ms exceeded" con
+ * `<launched>` pero sin conexión. En Linux sí funciona (posix_spawn los
+ * duplica bien), por eso el bug sólo se ve en el exe de Windows.
+ *
+ * Cambiamos a `--remote-debugging-port=0` (WebSocket en un puerto local que
+ * Playwright lee del stderr, fd 2, que sí funciona) y desactivamos el
+ * transporte pipe en la clase base, que es la que Chromium hereda. Firefox ya
+ * usa puerto, y WebKit sobrescribe el método: no cambian.
+ */
+function patchWebSocketTransport(path: string, source: string): string {
+  if (source.includes("YATT_WS_TRANSPORT")) {
+    // Idempotente: verificar que ambos cambios estén aplicados.
+    if (source.includes('push("--remote-debugging-port=0"); /*YATT_WS_TRANSPORT*/'))
+      return source;
+    fail(`P4 marcado pero incompleto en ${path}`);
+  }
+  const pushPattern = 'chromeArguments.push("--remote-debugging-pipe");';
+  if (!source.includes(pushPattern)) fail(`patrón P4a no encontrado en ${path}`);
+  source = source.replace(
+    pushPattern,
+    'chromeArguments.push("--remote-debugging-port=0"); /*YATT_WS_TRANSPORT*/',
+  );
+  const supportsPattern = `supportsPipeTransport(options) {
+        return true;
+      }`;
+  if (!source.includes(supportsPattern)) fail(`patrón P4b no encontrado en ${path}`);
+  source = source.replace(
+    supportsPattern,
+    `supportsPipeTransport(options) {
+        /*YATT_WS_TRANSPORT*/ return false;
+      }`,
+  );
+  // P4c: el override de Chromium pasa las launch options tal cual, y el
+  // helper sólo espera el endpoint si ve el flag en `options.args` (que son
+  // los argumentos del USUARIO, no los del proceso). Sin esto, el wsEndpoint
+  // queda undefined ("Invalid URL: undefined").
+  const readyPattern = "return waitForReadyState(options, browserLogsCollector);";
+  if (!source.includes(readyPattern)) fail(`patrón P4c no encontrado en ${path}`);
+  source = source.replace(
+    readyPattern,
+    'return waitForReadyState({ ...options, args: ["--remote-debugging-port=0"] }, browserLogsCollector); /*YATT_WS_TRANSPORT*/',
+  );
+  return source;
+}
+
 /** Aplica (o verifica ya aplicados) los parches. Backups .orig solo la primera vez. */
-function applyPatches(): void {
+/** P4 sólo bajo --ws-transport: el transporte WebSocket de bun-compile cuelga
+ *  incluso en Linux (<ws connecting> y silencio: el cliente `ws` de bun no
+ *  termina el handshake en binarios compilados). Con runtime=node los pipes
+ *  funcionan nativamente y P4 no hace falta. Queda el flag por si algún día
+ *  hay que revivir bun en Windows. */
+function applyPatches(opts: { wsTransport: boolean }): void {
   const targets: Array<[string, (p: string, s: string) => string]> = [
     ["package.js", patchPackageJson],
     ["serverRegistry.js", patchPackageJson],
-    ["coreBundle.js", (p, s) => patchBrowsersJson(p, patchPackageJson(p, patchInProcessDownload(p, s)))],
+    [
+      "coreBundle.js",
+      (p, s) => {
+        let out = patchBrowsersJson(p, patchPackageJson(p, patchInProcessDownload(p, s)));
+        if (opts.wsTransport) out = patchWebSocketTransport(p, out);
+        return out;
+      },
+    ],
   ];
   for (const [name, patcher] of targets) {
     const path = join(lib, name);
@@ -168,21 +231,114 @@ async function main(): Promise<void> {
     const i = args.indexOf(flag);
     return i !== -1 ? args[i + 1] : undefined;
   };
+  const hasFlag = (flag: string) => args.includes(flag);
+  const runtime = getArg("--runtime") ?? "bun"; // bun | node (SEA)
   const target = getArg("--target"); // ej. bun-windows-x64; default: host
   const outfile = getArg("--outfile");
   if (!outfile) fail("falta --outfile");
+  const outPath = resolve(scriptDir, "..", outfile);
+  const sidecarDir = resolve(scriptDir, "..");
 
-  applyPatches();
+  if (runtime === "node") {
+    // Host SEA: por defecto el node.exe de Windows; --host para probar en el
+    // host local (p. ej. el binario de Node de Linux) con el mismo pipeline.
+    await buildNodeSea({ outPath, sidecarDir, hostOverride: getArg("--host") });
+    return;
+  }
+
+  applyPatches({ wsTransport: hasFlag("--ws-transport") });
 
   const entry = resolve(scriptDir, "../src/index.ts");
   const cmd = ["build", "--compile"];
   if (target) cmd.push(`--target=${target}`);
-  cmd.push(entry, `--outfile=${resolve(scriptDir, "..", outfile)}`);
+  cmd.push(entry, `--outfile=${outPath}`);
   console.log(`[build-sidecar] bun ${cmd.join(" ")}`);
-  const proc = Bun.spawn(["bun", ...cmd], { cwd: resolve(scriptDir, ".."), stdout: "inherit", stderr: "inherit" });
+  const proc = Bun.spawn(["bun", ...cmd], { cwd: sidecarDir, stdout: "inherit", stderr: "inherit" });
   const code = await proc.exited;
   if (code !== 0) fail(`bun build terminó con código ${code}`);
   console.log(`[build-sidecar] listo: ${outfile}`);
+}
+
+/**
+ * Build del sidecar como Single Executable Application de Node.
+ *
+ * Motivación: bun-compile rompe en Windows dos cosas que Playwright necesita
+ * (fds 3/4 para --remote-debugging-pipe, y el handshake del cliente `ws`), y
+ * la PC destino no tiene Node instalado. SEA incrusta el bundle + los assets
+ * del runtime en una copia del binario oficial de Node: un solo .exe, con el
+ * runtime que Playwright soporta oficialmente.
+ *
+ * Los parches P1-P3 siguen siendo necesarios: las rutas horneadas de
+ * `__dirname` no existen en la máquina destino, y `fork(libPath(...))` de la
+ * descarga apunta a rutas de build.
+ *
+ * Requiere `sea/node-win.exe` (Node oficial de Windows, sin modificar) y un
+ * Node local (>= 20) para generar el blob.
+ */
+async function buildNodeSea(opts: {
+  outPath: string;
+  sidecarDir: string;
+  hostOverride?: string;
+}): Promise<void> {
+  const { outPath, sidecarDir } = opts;
+  const seaDir = join(sidecarDir, "sea");
+  mkdirSync(seaDir, { recursive: true });
+  const hostBinary = opts.hostOverride
+    ? resolve(scriptDir, "..", opts.hostOverride)
+    : join(seaDir, "node-win.exe");
+  if (!existsSync(hostBinary)) {
+    fail(
+      `falta ${hostBinary}: descargá el binario oficial de Node (sin modificar, es el host del SEA) o pasá --host <ruta>`,
+    );
+  }
+
+  // El bundle debe regenerarse desde los node_modules PRISTINOS (.orig) con
+  // P1-P3 pero SIN P4: bajo Node real el transporte pipe funciona.
+  applyPatches({ wsTransport: false });
+
+  const bundle = join(seaDir, "bundle.cjs");
+  const entry = resolve(scriptDir, "../src/index.ts");
+  await run(["bun", "build", "--target=node", "--format=cjs", entry, `--outfile=${bundle}`], sidecarDir);
+
+  const seaConfig = join(seaDir, "sea-config.json");
+  writeFileSync(
+    seaConfig,
+    JSON.stringify(
+      {
+        main: bundle,
+        output: join(seaDir, "sea-prep.blob"),
+        disableExperimentalSEAWarning: true,
+        useSnapshot: false,
+        useCodeCache: false,
+      },
+      null,
+      2,
+    ),
+  );
+  await run(["node", "--experimental-sea-config", seaConfig], sidecarDir);
+
+  // Host: copia del binario oficial de Node + inyección del blob (postject).
+  copyFileSync(hostBinary, outPath);
+  await run(
+    [
+      "bunx",
+      "postject",
+      outPath,
+      "NODE_SEA_BLOB",
+      join(seaDir, "sea-prep.blob"),
+      "--sentinel-fuse",
+      "NODE_SEA_FUSE_fce680ab2cc467b6e072b8b5df1996b2",
+    ],
+    sidecarDir,
+  );
+  console.log(`[build-sidecar] listo (node SEA): ${outPath}`);
+}
+
+async function run(cmd: string[], cwd: string): Promise<void> {
+  console.log(`[build-sidecar] ${cmd.join(" ")}`);
+  const proc = Bun.spawn(cmd, { cwd, stdout: "inherit", stderr: "inherit" });
+  const code = await proc.exited;
+  if (code !== 0) fail(`"${cmd[0]} ..." terminó con código ${code}`);
 }
 
 main();
