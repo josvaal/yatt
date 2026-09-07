@@ -15,6 +15,20 @@ Node). Tests guardados como JSON.
 Estado actual: **Fase 2 completada — variables, entornos y data-driven** (ver
 `ROADMAP.md` y `PRODUCT.md`).
 
+## Capturas
+
+**Editor** — pasos del test, panel del navegador y preview en vivo:
+
+![Editor de YATT](assets/screenshots/editor.png)
+
+**Variables y entornos** — valores por entorno y sobrescrituras por corrida:
+
+![Variables y entornos](assets/screenshots/variables.png)
+
+**Datos** — dataset CSV para corridas data-driven:
+
+![Dataset data-driven](assets/screenshots/datos.png)
+
 ## Integración con IA (MCP)
 
 YATT incluye un **servidor MCP** (`mcp/`) para que un asistente de IA gestione
