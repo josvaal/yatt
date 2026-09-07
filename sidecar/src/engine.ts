@@ -98,7 +98,8 @@ export function interp(value: string | undefined, vars: Record<string, string>):
   );
 }
 
-function resolve(step: Step, vars: Record<string, string>): Step {
+/** Resuelve los campos interpolables de un paso (value, selector, attribute). */
+export function resolve(step: Step, vars: Record<string, string>): Step {
   return {
     ...step,
     value: interp(step.value, vars),

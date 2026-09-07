@@ -120,12 +120,16 @@ export function registerBrowserTools(server: McpServer, ctx: Ctx): void {
     "browser_run_step",
     {
       description:
-        "Ejecuta un paso YATT (hoja) en la página actual: click, type, hover, assert_*, goto, wait_visible, etc. Devuelve ok/error, duración y, si falla, un screenshot de evidencia. Pasos de estructura (if/repeat/for_each/run_flow) se corren con test_run, no aquí.",
+        "Ejecuta un paso YATT (hoja) en la página actual: click, type, hover, assert_*, goto, wait_visible, etc. Devuelve ok/error, duración y, si falla, un screenshot de evidencia. Con `vars` interpola {{nombre}} en el paso antes de ejecutarlo. Pasos de estructura (if/repeat/for_each/run_flow) se corren con test_run, no aquí.",
       inputSchema: z.object({
         step: z
           .record(z.string(), z.unknown())
           .describe("Paso YATT: {action, selector?, value?, attribute?, disabled?}"),
         timeoutMs: z.coerce.number().optional().describe("Timeout en ms (default 40000)"),
+        vars: z
+          .record(z.string(), z.string())
+          .optional()
+          .describe('Variables para interpolar {{nombre}} en el paso (p. ej. { "email": "a@b.com" })'),
       }),
     },
     async (args) => {
@@ -136,6 +140,7 @@ export function registerBrowserTools(server: McpServer, ctx: Ctx): void {
       const params = {
         step,
         ...(args.timeoutMs && args.timeoutMs > 0 ? { timeoutMs: args.timeoutMs } : {}),
+        ...(args.vars ? { vars: args.vars } : {}),
       };
       try {
         // Step OK: el sidecar responde `result` = StepResult {ok, ms, screenshot?}.

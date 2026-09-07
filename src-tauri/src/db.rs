@@ -4,13 +4,32 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-/// Raíz del proyecto (el directorio padre de src-tauri): los datos viven aquí,
-/// portables y versionables con Git, y FUERA del árbol de `src-tauri` que
-/// vigila `tauri dev` (si no, guardar o borrar un archivo disparaba
-/// recompilación y reinicio de la app).
+/// Raíz de datos de YATT (donde viven `tests/`, `reports/`, `baselines/`,
+/// `sessions/` y `yatt.db`), en orden de prioridad:
+///
+/// 1. `YATT_ROOT` (inyectada por quien lance la app; permite tests e
+///    integraciones elegir la raíz).
+/// 2. El directorio padre de `src-tauri` en desarrollo: datos portables y
+///    versionables con Git, FUERA del árbol que vigila `tauri dev` (si no,
+///    guardar o borrar un archivo disparaba recompilación).
+/// 3. En producción, junto al ejecutable: instalación portable, el usuario
+///    final no depende de rutas de compile-time.
 pub fn project_root() -> PathBuf {
+    if let Some(root) = std::env::var_os("YATT_ROOT") {
+        if !root.is_empty() {
+            return PathBuf::from(root);
+        }
+    }
     let here = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    here.parent().unwrap_or(&here).to_path_buf()
+    if let Some(dev_root) = here.parent() {
+        if dev_root.join("sidecar").exists() {
+            return dev_root.to_path_buf();
+        }
+    }
+    std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe.parent().map(|d| d.to_path_buf()))
+        .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")))
 }
 
 fn now_ms() -> i64 {

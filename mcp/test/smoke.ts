@@ -176,6 +176,15 @@ const textOf = (res: unknown) => {
     const ev = await jsonOf("browser_eval", { expression: "document.querySelector('#result').textContent" });
     check("browser_eval lee el DOM", ev.value === "demo", String(ev.value));
 
+    // browser_run_step con vars: {{email}} se interpola antes de ejecutar.
+    const tv = await jsonOf("browser_run_step", {
+      step: { action: "type", selector: "#username", value: "{{email}}" },
+      vars: { email: "var@test.dev" },
+    });
+    check("browser_run_step con vars", tv.ok === true);
+    const ev2 = await jsonOf("browser_eval", { expression: "document.querySelector('#username').value" });
+    check("browser_run_step interpola {{var}}", ev2.value === "var@test.dev", String(ev2.value));
+
     // ---- Pestañas y sesiones ----
     const tabs2 = await jsonOf("tab_open", { url: "about:blank" });
     check("tab_open → 2 pestañas", tabs2.tabs.length === 2);

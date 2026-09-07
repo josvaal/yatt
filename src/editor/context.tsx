@@ -225,6 +225,8 @@ interface EditorContextValue {
   // estado global
   connected: boolean;
   browserOpen: boolean;
+  /** True mientras el sidecar descarga el navegador (primera ejecución). */
+  installing: boolean;
   headless: boolean;
   setHeadless: (h: boolean) => void;
   appError: string | null;
@@ -411,6 +413,7 @@ export function EditorProvider({ children }: { children: ReactNode }) {
   const [geoLon, setGeoLon] = useState("-58.3816");
   const [connected, setConnected] = useState(false);
   const [browserOpen, setBrowserOpen] = useState(false);
+  const [installing, setInstalling] = useState(false);
   const [steps, setSteps] = useState<Step[]>([]);
   const [status, setStatus] = useState<Record<Ids, StepStatus>>({});
   const [lastResult, setLastResult] = useState<LastResult | null>(null);
@@ -617,6 +620,15 @@ export function EditorProvider({ children }: { children: ReactNode }) {
         case "sidecar_ready":
           setConnected(true);
           break;
+        case "browser_install_started":
+          setInstalling(true);
+          break;
+        case "browser_install_finished":
+          setInstalling(false);
+          break;
+        case "browser_install_failed":
+          setInstalling(false);
+          break;
         case "log": {
           // Logs del sidecar para el reporte (RF-16).
           const msg = String((ev.data as { message?: unknown })?.message ?? "");
@@ -684,8 +696,10 @@ export function EditorProvider({ children }: { children: ReactNode }) {
   }
 
   /** Ejecuta un paso individual (botón ▶ de la fila). Los pasos de bloque se
-   *  corren completos con su propio estado de corrida; las hojas van al sidecar. */
-  async function runOne(step: Step, statusId?: Ids, vars: Record<string, string> = {}) {
+   *  corren completos con su propio estado de corrida; las hojas van al sidecar.
+   *  Sin ámbito explícito usa las variables del test (env activo + overrides). */
+  async function runOne(step: Step, statusId?: Ids, vars?: Record<string, string>) {
+    const scope = vars ?? resolveVars(variables, activeEnv, overrides);
     const id = statusId ?? step.id;
     if (busyRef.current) return null;
     busyRef.current = true;
@@ -694,7 +708,7 @@ export function EditorProvider({ children }: { children: ReactNode }) {
         const state: RunState = { records: [], ok: 0, fail: 0, skipped: 0, counter: 0, stopped: false };
         setStatus((prev) => ({ ...prev, [id]: "running" }));
         // Un paso de bloque suelto no pausa antes de cada hijo (solo el runner global).
-        await runStepList([step], vars, state, { stepByStep: false });
+        await runStepList([step], scope, state, { stepByStep: false });
         const ok = state.fail === 0 && !state.stopped;
         setStatus((prev) => ({ ...prev, [id]: ok ? "ok" : "fail" }));
         const error = state.stopped
@@ -705,7 +719,7 @@ export function EditorProvider({ children }: { children: ReactNode }) {
         setLastResult({ stepId: id, ok, error });
         return { ok, error };
       }
-      return await runLeaf(step, id, vars);
+      return await runLeaf(step, id, scope);
     } finally {
       busyRef.current = false;
     }
@@ -1743,6 +1757,7 @@ export function EditorProvider({ children }: { children: ReactNode }) {
     setPage,
     connected,
     browserOpen,
+    installing,
     headless,
     setHeadless,
     browserKind,

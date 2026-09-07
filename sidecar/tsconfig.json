@@ -1,0 +1,13 @@
+{
+  "compilerOptions": {
+    "target": "ESNext",
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "allowImportingTsExtensions": true,
+    "noEmit": true,
+    "paths": {
+      "chromium-bidi/lib/cjs/*": ["./stubs/chromium-bidi.ts"]
+    }
+  },
+  "include": ["src"]
+}

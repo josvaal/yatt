@@ -157,6 +157,13 @@ const core: Section = {
       "timeout configurable corta el paso: " + String(timeouts.error).slice(0, 60),
     );
 
+    // Variables en pasos sueltos: {{nombre}} se interpola con `vars`.
+    const varsel = await s.req("run_step", {
+      step: { action: "assert_visible", selector: "{{titulo}}" },
+      vars: { titulo: "h1" },
+    });
+    assert(varsel.ok === true, "run_step interpola vars en selector");
+
     await s.req("close", {});
     const noPage = await s.req("run_step", { step: { action: "click", selector: "h1" } });
     assert(noPage.ok === false, "run_step sin browser da error claro");

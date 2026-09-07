@@ -30,44 +30,111 @@ impl Default for SidecarState {
     }
 }
 
-/// Lanza el proceso sidecar (bun o node) con cwd en `sidecar/`, de modo que
-/// pueda importar playwright. En un build empaquetado esto se sustituirá por un
-/// binario sidecar registrado en Tauri (phase de distribución).
-///
-/// `YATT_ROOT` apunta a la raíz del proyecto: el sidecar guarda ahí sus
-/// baselines/ y sesiones/ (misma raíz que tests/ y reports/ del frontend).
+/// Lanza el proceso sidecar. En un build distribuido el sidecar viaja como un
+/// binario compilado (`yatt-sidecar(.exe)`) junto al ejecutable principal y
+/// `YATT_ROOT` apunta a la raíz portable de datos (ver `db::project_root`).
+/// En desarrollo, hace fallback a bun/node ejecutando `sidecar/src/index.ts`
+/// desde el repo, de modo que pueda importar playwright.
 fn spawn_child() -> Result<(Child, ChildStdin, ChildStdout), String> {
-    let base = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..").join("sidecar");
-    let script = base.join("src").join("index.ts");
-    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..");
+    let root = crate::db::project_root();
 
     let mut candidates: Vec<(String, Vec<String>)> = Vec::new();
     if let Ok(bin) = std::env::var("YATT_SIDECAR") {
         candidates.push((bin, Vec::new()));
     }
+    // Producción: binario sidecar compilado, junto al ejecutable principal.
+    // Se prueban el nombre plano y el sufijo con target triple (así lo nombra
+    // el bundler de Tauri para `externalBin`).
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            for name in ["yatt-sidecar", "yatt-sidecar-x86_64-pc-windows-gnu"] {
+                let path = dir.join(name).with_extension(std::env::consts::EXE_EXTENSION);
+                if path.exists() {
+                    candidates.push((path.display().to_string(), Vec::new()));
+                }
+            }
+        }
+    }
+    // Desarrollo: bun o Node 23+ (type stripping) ejecutando el TS directo.
+    let base = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..").join("sidecar");
+    let script = base.join("src").join("index.ts");
     candidates.push(("bun".to_string(), vec!["run".to_string(), script.display().to_string()]));
-    // Node 23+ ejecuta TS con type stripping directamente.
     candidates.push(("node".to_string(), vec![script.display().to_string()]));
 
     let mut last_err = String::from("no se encontró un runtime para el sidecar");
+    rotate_log_if_needed();
     for (bin, args) in candidates {
+        log_line(&format!("[bridge] intentando lanzar sidecar: {bin} {}", args.join(" ")));
         let mut cmd = Command::new(&bin);
         cmd.args(&args)
-            .current_dir(&base)
+            // El sidecar usa YATT_ROOT como raíz de datos; el cwd sólo importa
+            // en desarrollo (resolver node_modules). Si `base` no existe
+            // (producción), caemos a la raíz de datos.
+            .current_dir(if base.exists() { base.clone() } else { root.clone() })
             .env("YATT_ROOT", &root)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::inherit());
+            .stderr(Stdio::piped());
+        // Windows: el sidecar es un binario de consola; sin esta flag, al
+        // lanzarlo desde la app GUI parpadea una ventana negra de consola.
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+            cmd.creation_flags(CREATE_NO_WINDOW);
+        }
         match cmd.spawn() {
             Ok(mut child) => {
                 let stdin = child.stdin.take().ok_or("sidecar sin stdin")?;
                 let stdout = child.stdout.take().ok_or("sidecar sin stdout")?;
+                let stderr = child.stderr.take();
+                log_line(&format!("[bridge] sidecar lanzado (pid {:?})", child.id()));
+                // El stderr del sidecar va al log: en un build distribuido no
+                // hay consola donde caería (antes era Stdio::inherit).
+                if let Some(stderr) = stderr {
+                    std::thread::spawn(move || {
+                        let reader = BufReader::new(stderr);
+                        for line in reader.lines().map_while(Result::ok) {
+                            log_line(&format!("[sidecar-err] {line}"));
+                        }
+                    });
+                }
                 return Ok((child, stdin, stdout));
             }
-            Err(e) => last_err = format!("{bin}: {e}"),
+            Err(e) => {
+                last_err = format!("{bin}: {e}");
+                log_line(&format!("[bridge] fallo al lanzar {bin}: {e}"));
+            }
         }
     }
+    log_line(&format!("[bridge] sin sidecar disponible: {last_err}"));
     Err(last_err)
+}
+
+/// Log de diagnóstico del puente en `yatt-sidecar.log` (junto a los datos):
+/// intentos de spawn, stderr del sidecar y salida inesperada. Siempre activo
+/// en builds distribuidos: sin consola visible, es la única ventana al motor.
+fn log_line(msg: &str) {
+    use std::io::Write;
+    // Los payloads (screenshots base64, etc.) son enormes: guardamos un corte.
+    const MAX: usize = 2000;
+    let truncated = if msg.len() > MAX { &msg[..msg.floor_char_boundary(MAX)] } else { msg };
+    let path = crate::db::project_root().join("yatt-sidecar.log");
+    let mut file = std::fs::OpenOptions::new().create(true).append(true).open(path).ok();
+    if let Some(f) = file.as_mut() {
+        let _ = writeln!(f, "{}", truncated);
+        let _ = f.flush();
+    }
+}
+
+/// Poda el log si supera ~1 MB: lo trunca antes de un nuevo spawn.
+fn rotate_log_if_needed() {
+    let path = crate::db::project_root().join("yatt-sidecar.log");
+    if let Ok(meta) = std::fs::metadata(&path) {
+        if meta.len() > 1_000_000 {
+            let _ = std::fs::write(&path, b"");
+        }
+    }
 }
 
 /// Log de depuración del bridge, activo solo con la variable YATT_DEBUG=1.
@@ -88,8 +155,12 @@ fn read_loop(
     for line in reader.lines() {
         let line = match line {
             Ok(l) => l,
-            Err(_) => break,
+            Err(e) => {
+                log_line(&format!("[bridge] error leyendo stdout: {e}"));
+                break;
+            }
         };
+        log_line(&format!("[sidecar-out] {line}"));
         let msg: Value = match serde_json::from_str(&line) {
             Ok(v) => v,
             Err(_) => continue,
@@ -112,6 +183,7 @@ fn read_loop(
         }
     }
     // EOF: el sidecar murió o fue asesinado.
+    log_line("[bridge] stdout EOF: el sidecar terminó");
     let _ = app.emit(EVENT_CHANNEL, json!({ "type": "event", "name": "sidecar_exited" }));
     let _ = app.emit(EVENT_CHANNEL, json!({ "type": "event", "name": "browser_status", "data": { "open": false } }));
 }
@@ -167,7 +239,13 @@ pub async fn sidecar_request(
         }
     }
 
-    let timeout = std::time::Duration::from_secs(180);
+    // El `open` puede implicar descargar el navegador (primera ejecución en
+    // una máquina limpia): le damos mucho más margen que al resto.
+    let timeout = if method == "open" {
+        std::time::Duration::from_secs(900)
+    } else {
+        std::time::Duration::from_secs(180)
+    };
     let resp = tokio::time::timeout(timeout, rx)
         .await
         .map_err(|_| format!("timeout del sidecar en método '{method}'"))?

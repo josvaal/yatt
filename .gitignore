@@ -32,3 +32,8 @@ dist-ssr
 reports
 
 yatt.db
+yatt.db-shm
+yatt.db-wal
+/portable
+portable
+

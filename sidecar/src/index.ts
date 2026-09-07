@@ -25,10 +25,12 @@ import {
   type Page,
 } from "playwright";
 import { HELPER_JS } from "./interaction.ts";
+import { ensureBrowser } from "./browser-install.ts";
 import {
   executeLeaf,
   evalConditionOn,
   getDb,
+  resolve,
   sanitizeName,
   sessionsDir,
   type Step,
@@ -265,6 +267,9 @@ async function openBrowser(params: {
   await closeBrowser();
   toolbarVars = Array.isArray(params.variables) ? params.variables.map(String) : [];
   engineName = params.browser && params.browser in ENGINE_LAUNCHERS ? params.browser : "chromium";
+  // Auto-instalación: si el navegador no está descargado en esta máquina, se
+  // baja antes del launch (sólo chromium, el motor por defecto).
+  await ensureBrowser(engineName, emit);
   browser = await ENGINE_LAUNCHERS[engineName].launch({ headless: params.headless ?? false });
   // Sesión (RF-23): la fuente de verdad es la DB (yatt.db); fallback al fichero
   // legacy sessions/<name>.json pre-migración o si la DB no está disponible.
@@ -420,7 +425,13 @@ async function handleRequest(id: number, method: string, params: Record<string, 
           respond(id, false, { error: "el navegador no está abierto (ejecuta 'open' primero)" });
           return;
         }
-        const step = params.step as Step;
+        // Variables opcionales ({{nombre}} → valor) para pasos sueltos en vivo.
+        const rawVars = params.vars as Record<string, unknown> | undefined;
+        const vars: Record<string, string> = {};
+        if (rawVars && typeof rawVars === "object") {
+          for (const [k, v] of Object.entries(rawVars)) vars[k] = String(v);
+        }
+        const step = (Object.keys(vars).length ? resolve(params.step as Step, vars) : params.step) as Step;
         const timeoutMs = Number(params.timeoutMs) > 0 ? Number(params.timeoutMs) : 40000;
         const r = await withTimeout(executeStep(step, p, true), timeoutMs, "ejecución del paso");
         respond(id, r.ok, r.ok ? { result: r } : { error: r.error, result: r });

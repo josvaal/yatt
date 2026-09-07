@@ -299,8 +299,9 @@ export function TopBar() {
     setTestName,
     handleSave,
     steps,
-    connected,
-    browserOpen,
+  connected,
+  browserOpen,
+  installing,
     runningAll,
     stopping,
     handleStop,
@@ -338,6 +339,12 @@ export function TopBar() {
             <span className={cn("size-1.5 shrink-0 rounded-full", browserOpen ? "bg-emerald-500" : "bg-zinc-400")} />
             {browserOpen ? t("state.browserOpen") : t("state.browserClosed")}
           </span>
+          {installing && (
+            <span className="flex items-center gap-1.5 text-amber-500">
+              <Loader2 className="size-3.5 animate-spin" />
+              {t("state.installingBrowser")}
+            </span>
+          )}
         </span>
         {runningAll ? (
           <Button
