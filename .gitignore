@@ -31,6 +31,8 @@ dist-ssr
 /reports
 reports
 
+/baselines
+
 yatt.db
 yatt.db-shm
 yatt.db-wal
