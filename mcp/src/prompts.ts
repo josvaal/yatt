@@ -91,4 +91,33 @@ Regla: no modifiques datos reales; si necesitás escribir en formularios, usá v
       },
     ],
   }));
+
+  server.registerPrompt("bateria-de-flujos", {
+    description:
+      "Guía para convertir flujos repetidos en una batería reutilizable: login con variables, sesiones guardadas, sub-flujos y corridas data-driven",
+  }, async () => ({
+    messages: [
+      {
+        role: "user",
+        content: {
+          type: "text",
+          text: `Vas a convertir los flujos que hoy repetís en vivo (login, altas, aprobaciones, ciclos completos) en una batería de tests reutilizables. Objetivo: grabar una vez, reutilizar cambiando solo los datos.
+
+Regla de oro: si ya repetiste un flujo dos veces en vivo, la tercera va como test guardado. No sigas clickeando lo mismo.
+
+Procedimiento:
+
+1. Identificá los flujos repetidos y qué varía en cada ciclo: usuarios/roles, credenciales, datos de formularios.
+2. Grabá el login UNA vez como test con variables {{usuario}} y {{pass}} (nada de credenciales fijas). Elegí selectores robustos con browser_open + browser_preview + browser_eval (data-testid → id → CSS corto único), armá el JSON, validalo con test_validate, guardalo con test_create y dejalo verde con test_run.
+3. Guardá la sesión de cada usuario/rol: con el navegador logueado, session_save con nombre claro (ej: "admin", "operador"). En los próximos ciclos abrí con browser_open + session en vez de re-loguear: cambiar de rol es instantáneo y no destruye nada.
+4. Partí los flujos largos en sub-flujos guardados (un test por tramo: login, crear trámite, adjuntar, avanzar) y componelos con run_flow + withVars para inyectar los datos de cada ciclo.
+5. Lo que varía va en variables, no en tests duplicados: test_run con overrides para una corrida distinta, o test_run_dataset para una corrida por fila (ej: una por usuario).
+6. Esperá por condición, no por plazo: wait_visible (o un assert) antes de seguir; wait fijo solo como último recurso y acotado.
+7. Corré la batería completa con test_run (headless) y diagnosticá fallos con report_get + el navegador en vivo.
+
+Entrega: tests verdes guardados, sesiones por usuario, y un resumen de qué cubre cada uno. La próxima vez que toque verificar lo mismo, corre test_run: no rehagas los flujos en vivo.`,
+        },
+      },
+    ],
+  }));
 }

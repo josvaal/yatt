@@ -36,3 +36,10 @@ bun run /ruta/al/repo/mcp/src/server.ts --root /ruta/al/repo
    El CLI headless: `bun run sidecar/src/cli.ts run tests/<nombre>.yatt.json`.
 5. El frontend compila con `bun run build`; el sidecar y el MCP corren TS
    directo con bun (sin build).
+6. Flujos que se repiten (login, ciclos de alta/aprobación): no los repitas
+   en vivo. Grabalos una vez como tests con variables (`{{usuario}}`),
+   guardá la sesión de cada usuario con `session_save`, componé tramos con
+   `run_flow` + `withVars` y variá datos con `dataset`/overrides. Regla:
+   si un flujo ya va por la tercera repetición en vivo, va como test
+   guardado. El prompt `bateria-de-flujos` del MCP guía el procedimiento
+   completo.
