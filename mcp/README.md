@@ -16,13 +16,14 @@ validación/export/reportes del frontend.
 |---|---|
 | **Tests** | `test_list` · `test_get` · `test_create` · `test_update` · `test_delete` · `test_rename` · `test_duplicate` · `test_validate` · `test_export_playwright` |
 | **Runner** | `test_run` (headless, env, overrides, reporte) · `test_run_dataset` (data-driven por filas) |
-| **Navegador en vivo** | `browser_open` · `browser_close` · `browser_status` · `browser_preview` (**screenshot que la IA ve**) · `browser_eval` (JS) · `browser_run_step` · `browser_condition` · `browser_scroll` · `browser_click_at` · `tab_open/list/switch/close` · `session_save/list/delete` |
+| **Navegador en vivo** | `browser_open` · `browser_close` · `browser_status` · `browser_preview` (**screenshot que la IA ve**) · `browser_eval` (JS) · `browser_run_step` · `browser_condition` (soporta timeout de polling) · `browser_scroll` · `browser_click_at` (devuelve el selector resuelto) · `tab_open/list/switch/close` · `session_save/list/delete` |
 | **Reportes** | `report_list` · `report_get` · `report_delete` |
+| **DB** | `db_query` (consultas de solo lectura contra la base de la app: `YATT_APP_DB`) |
 | **Meta** | `ping` · `schema` · `baseline_list` · `baseline_get` (imagen) |
 
 **Recursos**: `yatt://schema` (formato del test), `yatt://tests/{nombre}`,
 `yatt://reports/{nombre}`.
-**Prompts**: `crear-test`, `diagnosticar-reporte`, `explorar-pagina`, `exportar-spec`.
+**Prompts**: `bateria-de-flujos`, `crear-test`, `diagnosticar-reporte`, `explorar-pagina`, `exportar-spec`.
 
 ## Instalación
 
@@ -47,11 +48,15 @@ o usando `--root` explícito). El server detecta la raíz del repo automáticame
     "yatt": {
       "command": "bun",
       "args": ["run", "/home/usuario/Proyectos/yatt/mcp/src/server.ts"],
-      "cwd": "/home/usuario/Proyectos/yatt/mcp"
+      "cwd": "/home/usuario/Proyectos/yatt/mcp",
+      "env": { "YATT_APP_DB": "/ruta/a/la/base.db" }
     }
   }
 }
 ```
+
+La variable `YATT_APP_DB` (opcional) apunta a la base de datos de tu app bajo
+prueba y habilita los pasos `db_assert`/`db_wait` y la tool `db_query`.
 
 **Claude Code / Cursor / Zed**: mismo patrón (`command` + `args`).
 Si el repositorio está en otra ruta o querés otra raíz de datos:

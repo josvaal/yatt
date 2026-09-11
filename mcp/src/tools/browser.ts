@@ -170,10 +170,15 @@ export function registerBrowserTools(server: McpServer, ctx: Ctx): void {
     "browser_condition",
     {
       description:
-        "Comprueba si existe un elemento en la página (o si se cumple una condición de variable). Devuelve {value: boolean}.",
+        "Comprueba si existe un elemento en la página (o si se cumple una condición de variable); espera por condición con polling opcional (timeoutMs > 0 repite el chequeo hasta que sea verdadero o venza el timeout). Devuelve {value, elapsedMs}.",
       inputSchema: z.object({
         selector: z.string().optional().describe("Selector del elemento a comprobar"),
         value: z.string().optional().describe("Alternativa: condición de variable (p. ej. {{estado}} == ok)"),
+        timeoutMs: z.coerce
+          .number()
+          .optional()
+          .describe("Si es > 0, polling hasta que la condición sea verdadera o venza (default 0 = un solo chequeo)"),
+        intervalMs: z.coerce.number().optional().describe("Intervalo entre chequeos en ms (default 300)"),
       }),
     },
     async (args) =>
@@ -181,6 +186,8 @@ export function registerBrowserTools(server: McpServer, ctx: Ctx): void {
         await req("condition", {
           ...(args.selector !== undefined ? { selector: args.selector } : {}),
           ...(args.value !== undefined ? { value: args.value } : {}),
+          ...(args.timeoutMs !== undefined && args.timeoutMs > 0 ? { timeoutMs: args.timeoutMs } : {}),
+          ...(args.intervalMs !== undefined ? { intervalMs: args.intervalMs } : {}),
         }),
       ),
   );
@@ -203,7 +210,7 @@ export function registerBrowserTools(server: McpServer, ctx: Ctx): void {
     "browser_click_at",
     {
       description:
-        "Clic en coordenadas del viewport (x, y en píxeles CSS). Devuelve la preview actualizada. Preferí browser_run_step con selector para pasos reproducibles.",
+        "Clic en coordenadas del viewport (x, y en píxeles CSS); devuelve el selector resuelto del elemento clickeado (data-testid → id → path CSS) más la preview actualizada. Preferí browser_run_step con selector para pasos reproducibles.",
       inputSchema: z.object({ x: z.coerce.number(), y: z.coerce.number() }),
     },
     async (args) => {

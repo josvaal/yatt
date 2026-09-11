@@ -11,6 +11,7 @@ import { join } from "node:path";
 import { PNG } from "pngjs";
 import type { BrowserContext, Page } from "playwright";
 import { openYattDb, type YattDb } from "./db.ts";
+import { appDbConfigured, appDbQuery, type AppDbResult } from "./appdb.ts";
 
 export interface Step {
   id?: string;
@@ -30,6 +31,13 @@ export interface Step {
   baseline?: string;
   tolerance?: number;
   fullPage?: boolean;
+  // Pasos db_* (verificación contra la base de la app bajo prueba).
+  sql?: string;
+  expect?: "rows" | "empty" | "value";
+  /** Segundos (db_wait; default 10). */
+  timeout?: number;
+  /** Segundos entre intentos (db_wait; default 0.5, mínimo 0.1). */
+  interval?: number;
 }
 
 // Raíz de datos (baselines/sesiones): Rust la inyecta como YATT_ROOT.
@@ -98,13 +106,14 @@ export function interp(value: string | undefined, vars: Record<string, string>):
   );
 }
 
-/** Resuelve los campos interpolables de un paso (value, selector, attribute). */
+/** Resuelve los campos interpolables de un paso (value, selector, attribute, sql). */
 export function resolve(step: Step, vars: Record<string, string>): Step {
   return {
     ...step,
     value: interp(step.value, vars),
     selector: interp(step.selector, vars),
     attribute: interp(step.attribute, vars),
+    sql: interp(step.sql, vars),
   };
 }
 
@@ -114,6 +123,29 @@ export async function evalConditionOn(p: Page, selector?: string, value?: string
   if (sel) return (await p.locator(sel).count()) > 0;
   const v = (value ?? "").trim();
   return v !== "" && v !== "false" && v !== "0";
+}
+
+// ---- Pasos db_* (verificación contra la base de la app bajo prueba) ----
+
+/** Primera celda (fila 1, columna 1) stringificada y recortada, o null sin filas. */
+function scalarOf(res: AppDbResult): string | null {
+  const cell = res.rows[0]?.[0];
+  return cell === undefined ? null : String(cell).trim();
+}
+
+/** Snapshot acotado de un resultado (primera fila) para mensajes de error. */
+function snapshotOf(res: AppDbResult, max = 120): string {
+  const first = res.rows[0];
+  if (!first) return "sin filas";
+  const s = `[${first.map((c) => (c === null ? "null" : String(c))).join(", ")}]`;
+  return s.length > max ? s.slice(0, max) + "…" : s;
+}
+
+/** Requisito común de los pasos db_*: tener la base de la app configurada. */
+function requireAppDb(): void {
+  if (!appDbConfigured()) {
+    throw new Error("definí YATT_APP_DB (o --app-db) para usar pasos db_*");
+  }
 }
 
 /** Ejecuta una acción hoja sobre la página y devuelve el resultado (con
@@ -324,6 +356,63 @@ export async function executeLeaf(
           throw new Error(
             `verificar imagen: ${(ratio * 100).toFixed(2)}% de píxeles distintos (tolerancia ${(tol * 100).toFixed(2)}%)`,
           );
+        }
+        break;
+      }
+
+      // ---- Verificación contra la base de la app (solo lectura) ----
+      case "db_assert": {
+        requireAppDb();
+        const sql = (step.sql ?? "").trim();
+        if (!sql) throw new Error("db_assert: falta el campo sql");
+        const res = await appDbQuery(sql);
+        const expect = step.expect ?? "rows";
+        if (expect === "rows") {
+          if (res.totalRows < 1) {
+            throw new Error(`db_assert: se esperaban filas y la consulta devolvió 0 (${snapshotOf(res)})`);
+          }
+        } else if (expect === "empty") {
+          if (res.totalRows > 0) {
+            throw new Error(`db_assert: se esperaban 0 filas y hay ${res.totalRows} (${snapshotOf(res)})`);
+          }
+        } else if (expect === "value") {
+          if (step.value === undefined || step.value === "") {
+            throw new Error("db_assert: expect \"value\" pide el campo value a comparar");
+          }
+          const got = scalarOf(res);
+          if (got === null) {
+            throw new Error(`db_assert: sin filas para comparar el valor (${snapshotOf(res)})`);
+          }
+          const want = step.value.trim();
+          if (got !== want) {
+            throw new Error(`db_assert: se esperaba "${want}" pero hay "${got.slice(0, 80)}"`);
+          }
+        } else {
+          throw new Error(`db_assert: expect inválido "${expect}" (rows|empty|value)`);
+        }
+        break;
+      }
+      case "db_wait": {
+        requireAppDb();
+        const sql = (step.sql ?? "").trim();
+        if (!sql) throw new Error("db_wait: falta el campo sql");
+        const timeoutMs = Math.max(0, (Number(step.timeout) || 10) * 1000);
+        const intervalMs = Math.max(100, (Number(step.interval) || 0.5) * 1000);
+        const wantValue = step.value !== undefined && step.value !== "";
+        const t0 = Date.now();
+        for (;;) {
+          const res = await appDbQuery(sql);
+          const matched = wantValue
+            ? scalarOf(res) === step.value!.trim()
+            : res.totalRows >= 1;
+          if (matched) break;
+          const elapsed = Date.now() - t0;
+          if (elapsed >= timeoutMs) {
+            throw new Error(
+              `db_wait: timeout tras ${(elapsed / 1000).toFixed(1)}s sin que la consulta cumpla (${snapshotOf(res)})`,
+            );
+          }
+          await new Promise((r) => setTimeout(r, intervalMs));
         }
         break;
       }

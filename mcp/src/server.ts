@@ -5,6 +5,7 @@ import { Store } from "./db.ts";
 import { SidecarClient } from "./sidecar.ts";
 import { resolveRoot } from "./root.ts";
 import { registerBrowserTools } from "./tools/browser.ts";
+import { registerDbTools } from "./tools/db.ts";
 import { registerReportTools } from "./tools/reports.ts";
 import { registerRunTools } from "./tools/run.ts";
 import { registerTestTools } from "./tools/tests.ts";
@@ -47,6 +48,7 @@ async function main(): Promise<void> {
   registerTestTools(server, ctx);
   registerRunTools(server, ctx);
   registerBrowserTools(server, ctx);
+  registerDbTools(server, ctx);
   registerReportTools(server, ctx);
   registerResources(server, ctx);
   registerPrompts(server);

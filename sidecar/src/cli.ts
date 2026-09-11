@@ -11,6 +11,7 @@
  *   --override clave=valor               sobrescribe una variable (repetible)
  *   --timeout <segundos>                 timeout por paso (default 40)
  *   --url <url>                          sobrescribe la URL inicial del test
+ *   --app-db <ruta|postgres://>          base de la app para pasos db_* (default env YATT_APP_DB)
  *   --report <ruta.html>                 escribe el reporte HTML
  *   --json <ruta.json>                   escribe el reporte JSON
  *   --log                                imprime cada paso en stdout
@@ -22,6 +23,7 @@ import { dirname, join } from "node:path";
 import { existsSync, readFileSync, writeFileSync, mkdirSync } from "node:fs";
 import { chromium, firefox, webkit, type Page } from "playwright";
 import { runTestSteps, type RunOutcome, type Step } from "./engine.ts";
+import { setAppDbFlag } from "./appdb.ts";
 
 const ENGINES: Record<string, { launch: typeof chromium.launch }> = {
   chromium: { launch: chromium.launch.bind(chromium) },
@@ -36,6 +38,7 @@ interface Options {
   overrides: Record<string, string>;
   timeoutMs: number;
   url?: string;
+  appDb?: string;
   report?: string;
   json?: string;
   log: boolean;
@@ -50,6 +53,7 @@ Uso: yatt run <test.yatt.json> [opciones]
   --override clave=valor              sobrescribe una variable (repetible)
   --timeout <segundos>                timeout por paso (default 40)
   --url <url>                         sobrescribe la URL inicial
+  --app-db <ruta|postgres://>         base de la app para pasos db_* (default env YATT_APP_DB)
   --report <ruta.html>                escribe el reporte HTML
   --json <ruta.json>                  escribe el reporte JSON
   --log                                imprime cada paso
@@ -90,6 +94,9 @@ function parseArgs(argv: string[]): { cmd: string; file: string; opts: Options }
         break;
       case "--url":
         opts.url = next();
+        break;
+      case "--app-db":
+        opts.appDb = next();
         break;
       case "--report":
         opts.report = next();
@@ -192,6 +199,9 @@ async function main() {
     process.exit(2);
   }
   const { file, opts } = parsed;
+
+  // Base de la app (pasos db_*): el flag gana sobre la env YATT_APP_DB.
+  setAppDbFlag(opts.appDb);
 
   let doc: { name?: string; url?: string; steps?: Step[]; variables?: Array<{ name: string; values?: Record<string, string> }> };
   try {

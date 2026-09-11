@@ -24,8 +24,9 @@ import {
   type CDPSession,
   type Page,
 } from "playwright";
-import { HELPER_JS } from "./interaction.ts";
+import { HELPER_JS, selectorAtPoint } from "./interaction.ts";
 import { ensureBrowser } from "./browser-install.ts";
+import { appDbConfigured, appDbQuery, closeAppDb } from "./appdb.ts";
 import {
   executeLeaf,
   evalConditionOn,
@@ -491,9 +492,15 @@ async function handleRequest(id: number, method: string, params: Record<string, 
           respond(id, false, { error: "el navegador no está abierto" });
           return;
         }
+        // Resolver el elemento bajo el cursor ANTES del clic: selector robusto
+        // (data-testid → id → path CSS) para sugerir un paso reproducible.
+        const hit = await p
+          .evaluate(selectorAtPoint, [Number(params.x ?? 0), Number(params.y ?? 0)])
+          .catch(() => ({ selector: null, tag: null }));
         await p.mouse.click(Number(params.x ?? 0), Number(params.y ?? 0));
         await new Promise((r) => setTimeout(r, 120));
-        respond(id, true, { result: await previewPayload(p) });
+        const payload = await previewPayload(p);
+        respond(id, true, { result: { ...payload, selector: hit.selector, tag: hit.tag } });
         break;
       }
       case "start_grab": {
@@ -647,19 +654,38 @@ async function handleRequest(id: number, method: string, params: Record<string, 
         break;
       }
 
-      // ---- Condición de `if` (RF-18): existe el elemento, o valor no vacío ----
+      // ---- Condición de `if` (RF-18): existe el elemento, o valor no vacío.
+      // Con timeoutMs > 0 se repite (polling) hasta que sea verdadera o venza. ----
       case "condition": {
         const p = currentPage();
         if (!p) {
           respond(id, false, { error: "el navegador no está abierto" });
           return;
         }
-        const value = await evalConditionOn(
-          p,
-          String(params.selector ?? ""),
-          String(params.value ?? ""),
-        );
-        respond(id, true, { result: { value } });
+        const timeoutMs = Math.max(0, Number(params.timeoutMs) || 0);
+        const intervalMs = Math.max(10, Number(params.intervalMs) || 300);
+        const t0 = Date.now();
+        const evaluate = () =>
+          evalConditionOn(p, String(params.selector ?? ""), String(params.value ?? ""));
+        let value = await evaluate();
+        if (timeoutMs > 0) {
+          while (!value && Date.now() - t0 < timeoutMs) {
+            await new Promise((r) => setTimeout(r, intervalMs));
+            value = await evaluate();
+          }
+        }
+        respond(id, true, { result: { value, elapsedMs: Date.now() - t0 } });
+        break;
+      }
+
+      // ---- Consulta de solo lectura contra la base de la app (pasos db_*) ----
+      case "db_query": {
+        if (!appDbConfigured()) {
+          respond(id, false, { error: "definí YATT_APP_DB (o --app-db)" });
+          return;
+        }
+        const result = await appDbQuery(String(params.sql ?? ""));
+        respond(id, true, { result });
         break;
       }
 
@@ -743,12 +769,19 @@ async function start() {
     await handleRequest(id, method, params);
   });
   rl.on("close", () => {
-    closeBrowser().finally(() => process.exit(0));
+    closeBrowser()
+      .finally(() => {
+        closeAppDb();
+        process.exit(0);
+      });
   });
 }
 
 function shutdown() {
-  closeBrowser().finally(() => process.exit(0));
+  closeBrowser().finally(() => {
+    closeAppDb();
+    process.exit(0);
+  });
 }
 process.on("SIGTERM", shutdown);
 process.on("SIGINT", shutdown);

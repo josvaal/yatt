@@ -6,11 +6,12 @@
  *
  *   cd mcp && bun run test/smoke.ts
  */
-import { mkdirSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { Database } from "bun:sqlite";
 
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
@@ -24,6 +25,18 @@ function check(label: string, ok: boolean, extra = ""): void {
 const MCP_DIR = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const SMOKE_ROOT = join(tmpdir(), `yatt-mcp-smoke-${process.pid}-${Date.now()}`);
 mkdirSync(SMOKE_ROOT, { recursive: true });
+
+// Base efímera de la app bajo prueba: se la pasa al server por env
+// (YATT_APP_DB) y este la hereda al sidecar, habilitando la tool db_query.
+const APP_DB_DIR = mkdtempSync(join(tmpdir(), `yatt-mcp-appdb-${process.pid}-`));
+const APP_DB_PATH = join(APP_DB_DIR, "app.db");
+const seedAppDb = (): void => {
+  const db = new Database(APP_DB_PATH);
+  db.exec("CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY, name TEXT)");
+  db.run("DELETE FROM users");
+  db.run("INSERT INTO users (name) VALUES ('ana'), ('beto')");
+  db.close();
+};
 
 const PAGE = `<!doctype html><html><head><meta charset="utf-8"><title>YATT Smoke</title></head><body>
 <h1>YATT Smoke</h1>
@@ -50,6 +63,9 @@ async function main(): Promise<void> {
   await new Promise<void>((r) => server.listen(0, "127.0.0.1", r));
   port = (server.address() as { port: number }).port;
   const base = `http://127.0.0.1:${port}/`;
+
+  seedAppDb();
+  process.env.YATT_APP_DB = APP_DB_PATH; // el transporte lo propaga al server → sidecar
 
   const transport = new StdioClientTransport({
     command: "bun",
@@ -80,6 +96,7 @@ const textOf = (res: unknown) => {
     for (const required of ["test_create", "test_run", "browser_preview", "report_get", "schema", "test_run_dataset"]) {
       check(`tool ${required}`, names.includes(required));
     }
+    check("tool db_query", names.includes("db_query"));
     const prompts = await client.listPrompts();
     check("prompts registradas", prompts.prompts.length >= 4, `${prompts.prompts.length}`);
 
@@ -173,6 +190,21 @@ const textOf = (res: unknown) => {
     check("browser_run_step click", c.ok === true);
     const cond = await jsonOf("browser_condition", { selector: "#result" });
     check("browser_condition existe", cond.value === true);
+    // Polling opcional: condición falsa con timeout ~600 ms devuelve false con
+    // elapsedMs acotado y sin colgarse.
+    const pollT0 = Date.now();
+    const poll = await jsonOf("browser_condition", {
+      selector: "#no-existe",
+      timeoutMs: 600,
+      intervalMs: 100,
+    });
+    const pollWall = Date.now() - pollT0;
+    check(
+      "browser_condition polling timeout",
+      poll.value === false && poll.elapsedMs >= 500,
+      `elapsed=${poll.elapsedMs}ms wall=${pollWall}ms`,
+    );
+    check("browser_condition polling acotado", pollWall < 1500, `wall=${pollWall}ms`);
     const ev = await jsonOf("browser_eval", { expression: "document.querySelector('#result').textContent" });
     check("browser_eval lee el DOM", ev.value === "demo", String(ev.value));
 
@@ -184,6 +216,22 @@ const textOf = (res: unknown) => {
     check("browser_run_step con vars", tv.ok === true);
     const ev2 = await jsonOf("browser_eval", { expression: "document.querySelector('#username').value" });
     check("browser_run_step interpola {{var}}", ev2.value === "var@test.dev", String(ev2.value));
+
+    // ---- DB de la app bajo prueba (YATT_APP_DB heredada por el sidecar) ----
+    const dbq = await jsonOf("db_query", { sql: "SELECT id, name FROM users ORDER BY id" });
+    check(
+      "db_query columnas y filas",
+      JSON.stringify(dbq.columns) === '["id","name"]' &&
+        dbq.totalRows === 2 &&
+        dbq.rows?.[0]?.[1] === "ana",
+      JSON.stringify(dbq).slice(0, 90),
+    );
+    const dbIns = await call("db_query", { sql: "INSERT INTO users (name) VALUES ('x')" });
+    check(
+      "db_query solo lectura",
+      dbIns.isError === true && textOf(dbIns).includes("solo lectura"),
+      textOf(dbIns).slice(0, 60),
+    );
 
     // ---- Pestañas y sesiones ----
     const tabs2 = await jsonOf("tab_open", { url: "about:blank" });
@@ -243,6 +291,7 @@ const textOf = (res: unknown) => {
     await client.close();
     await new Promise<void>((r) => server.close(() => r()));
     rmSync(SMOKE_ROOT, { recursive: true, force: true });
+    rmSync(APP_DB_DIR, { recursive: true, force: true });
   }
 
   console.log(failures === 0 ? "\nSmoke MCP: TODO VERDE" : `\nSmoke MCP: ${failures} FALLOS`);

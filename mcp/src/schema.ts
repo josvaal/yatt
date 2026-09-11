@@ -43,6 +43,8 @@ Acciones de hoja (más usadas):
 - assert_text      verificar texto         → selector + value (texto esperado)
 - assert_value     verificar valor         → selector + value
 - assert_attribute verificar atributo      → selector + attribute (nombre) + value (esperado)
+- db_assert        verificar contra la base de datos de la app → sql (+ expect: "rows"|"empty"|"value" + value)
+- db_wait          esperar un dato en la base de la app        → sql (+ value opcional, timeout, interval)
 
 Acciones de estructura (contenedores con children):
 - if        condición: existe el selector (o value con variable) → children (sí) + elseChildren (no)
@@ -82,10 +84,29 @@ Reglas:
 }
 Las filas se usan como overrides de variables (una corrida por fila).
 
+## Verificación contra la base de datos
+
+Los pasos db_assert y db_wait consultan la base de datos de la app bajo prueba.
+Definí la conexión con la variable de entorno YATT_APP_DB o el flag --app-db del
+CLI (ruta de SQLite o URL "file:" / postgres://; la conexión es de solo lectura
+y las respuestas se recortan a 200 filas, aunque totalRows cuenta todas).
+
+{ "action": "db_assert", "sql": "SELECT status FROM orders WHERE id = {{orderId}}", "expect": "value", "value": "paid" }
+{ "action": "db_wait", "sql": "SELECT status FROM jobs WHERE id = {{jobId}}", "value": "done", "timeout": 15, "interval": 0.5 }
+
+- expect: "rows" (default; exige ≥1 fila) | "empty" (exige 0 filas) | "value" (compara la primera celda, stringificada y recortada, con value).
+- db_wait repite la consulta hasta que cumpla (value coincide, o hay filas si no se pasa value) o venza el timeout en segundos (default 10; interval en segundos, default 0.5, mínimo 0.1).
+- Guardia de solo lectura: se rechaza toda sentencia que no empiece con SELECT, WITH, EXPLAIN o PRAGMA.
+
 ## Guía rápida para la IA
 
 1. Usa test_validate antes de guardar: devuelve errores o el resumen normalizado.
 2. Prefiere acciones assert_* al final del test para verificar resultados.
 3. Usa {{variable}} en lugar de valores fijos cuando el dato varie por entorno.
 4. Tras crear/editar, corre con test_run y lee el reporte (report_get o yatt://reports/<nombre>) para diagnosticar fallos.
-5. Para explorar una página usa browser_open + browser_preview (la IA ve el screenshot) + browser_eval para inspeccionar el DOM y elegir selectores robustos.`;
+5. Para explorar una página usa browser_open + browser_preview (la IA ve el screenshot) + browser_eval para inspeccionar el DOM y elegir selectores robustos.
+6. Un flujo que se repite (login, altas, aprobaciones) va como test guardado con variables y se reutiliza con run_flow + withVars; no lo repitas en vivo ciclo tras ciclo.
+7. Sesiones: guarda el estado logueado con session_save y reábrelo con session en browser_open para cambiar de usuario sin re-loguear.
+8. Múltiples usuarios o combinaciones de datos: variables + dataset (una corrida por fila) u overrides en test_run; no dupliques tests.
+9. Espera por condición, no por plazo: wait_visible, un assert o db_wait (datos que escribe en background otro proceso) antes de seguir; wait fijo solo como último recurso.
+10. La prueba fuerte de un flujo va con db_assert contra la base de datos; no salgas del navegador a consultar a mano.`;

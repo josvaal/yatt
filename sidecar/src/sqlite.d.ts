@@ -2,6 +2,7 @@ declare module "bun:sqlite" {
   interface Statement {
     get(...params: unknown[]): unknown;
     all(...params: unknown[]): unknown[];
+    columns(): { name: string }[];
   }
   export class Database {
     constructor(path: string, options?: { readonly?: boolean; create?: boolean });
@@ -19,7 +20,7 @@ declare module "node:sqlite" {
     all(...params: unknown[]): unknown[];
   }
   export class DatabaseSync {
-    constructor(path: string, options?: { open?: boolean });
+    constructor(path: string, options?: { open?: boolean; readOnly?: boolean });
     exec(sql: string): void;
     prepare(sql: string): StatementSync;
     close(): void;

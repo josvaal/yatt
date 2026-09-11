@@ -19,6 +19,71 @@
 
 import { ICONS } from "./icons.ts";
 
+/**
+ * Selector robusto para el elemento bajo (x, y): corre dentro de la página vía
+ * page.evaluate (sidecar/index.ts, método click_at). Prioridad data-testid →
+ * id → ruta CSS (tag con :nth-of-type hacia arriba, tope ~5 niveles). Ignora
+ * la barra flotante YATT para no devolver su propio DOM.
+ */
+export function selectorAtPoint([x, y]: [number, number]): { selector: string | null; tag: string | null } {
+  const isToolbar = (el: Element | null): boolean =>
+    !!(el && (el as HTMLElement).closest && (el as HTMLElement).closest(".yatt-tk"));
+  let el = document.elementFromPoint(x, y) as Element | null;
+  if (isToolbar(el)) {
+    const stack = document.elementsFromPoint(x, y) as Element[];
+    el = stack.find((e) => !isToolbar(e)) ?? null;
+  }
+  if (!el || el.nodeType !== 1) return { selector: null, tag: null };
+  const tag = el.tagName.toLowerCase();
+  const uniq = (sel: string): boolean => {
+    try {
+      return document.querySelectorAll(sel).length === 1;
+    } catch {
+      return false;
+    }
+  };
+  const escAttr = (v: string): string => v.replace(/"/g, '\\"');
+  // CSS.escape del DOM (el `CSS` del módulo es la hoja de estilos, no el global).
+  const cssEscape = (v: string): string => {
+    const api = (globalThis as { CSS?: { escape?: (s: string) => string } }).CSS;
+    if (api && typeof api.escape === "function") return api.escape(v);
+    return v.replace(/[^A-Za-z0-9_-]/g, (ch) => `\\${ch}`);
+  };
+  const tid = el.getAttribute("data-testid");
+  if (tid && uniq(`[data-testid="${escAttr(tid)}"]`)) {
+    return { selector: `[data-testid="${escAttr(tid)}"]`, tag };
+  }
+  const elId = (el as HTMLElement).id;
+  if (elId && uniq(`#${cssEscape(elId)}`)) return { selector: `#${cssEscape(elId)}`, tag };
+  // Parte del path para un nodo: tag + :nth-of-type si comparte tag con hermanos.
+  const partOf = (node: Element): string => {
+    let part = node.tagName.toLowerCase();
+    const parent = node.parentElement;
+    if (parent) {
+      const same = Array.from(parent.children).filter((c) => c.tagName === node.tagName);
+      if (same.length > 1) part += `:nth-of-type(${same.indexOf(node) + 1})`;
+    }
+    return part;
+  };
+  // Un antepasado con selector único y corto corta la búsqueda.
+  let cur: Element | null = el;
+  let depth = 0;
+  while (cur && cur !== document.documentElement && depth < 5) {
+    const part = partOf(cur);
+    if (part && uniq(part)) return { selector: part, tag };
+    cur = cur.parentElement;
+    depth++;
+  }
+  // Fallback: path completo hacia arriba (capado a 5 niveles).
+  const parts: string[] = [];
+  let node: Element | null = el;
+  while (node && node !== document.documentElement && parts.length < 5) {
+    parts.unshift(partOf(node));
+    node = node.parentElement;
+  }
+  return { selector: parts.join(" > ") || null, tag };
+}
+
 const CSS = `
   .yatt-tk, .yatt-tk * { box-sizing: border-box; }
   .yatt-tk .yatt-card {

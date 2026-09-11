@@ -10,8 +10,9 @@
  */
 
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
-import { existsSync, rmSync, writeFileSync } from "node:fs";
-import { resolve } from "node:path";
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { join, resolve } from "node:path";
+import { tmpdir } from "node:os";
 import { Database } from "bun:sqlite";
 
 // Logs por stderr (sin buffering) para seguir el progreso en vivo.
@@ -39,10 +40,10 @@ interface Sidecar {
   child: ChildProcessWithoutNullStreams;
 }
 
-function spawnSidecar(): Sidecar {
+function spawnSidecar(extraEnv: Record<string, string> = {}): Sidecar {
   const child = spawn("bun", ["run", "src/index.ts"], {
     cwd,
-    env: { ...process.env, YATT_ROOT: SMOKE_ROOT },
+    env: { ...process.env, YATT_ROOT: SMOKE_ROOT, ...extraEnv },
     stdio: ["pipe", "pipe", "inherit"],
   });
   let buf = "";
@@ -96,6 +97,8 @@ function spawnSidecar(): Sidecar {
 
 interface Section {
   name: string;
+  /** Env extra para el sidecar de esta sección (p. ej. YATT_APP_DB). */
+  env?: Record<string, string>;
   run(s: Sidecar, assert: (cond: boolean, label: string) => void): Promise<void>;
 }
 
@@ -111,7 +114,7 @@ async function runSection(sec: Section) {
   console.log(`\n=== Sección: ${sec.name} ===`);
   // Estado de datos limpio para cada sección (baselines/sesiones).
   rmSync(SMOKE_ROOT, { recursive: true, force: true });
-  const s = spawnSidecar();
+  const s = spawnSidecar(sec.env);
   const assert = makeAssert(sec.name);
   try {
     await sec.run(s, assert);
@@ -163,6 +166,18 @@ const core: Section = {
       vars: { titulo: "h1" },
     });
     assert(varsel.ok === true, "run_step interpola vars en selector");
+
+    // Sin YATT_APP_DB: db_query y pasos db_* fallan con error claro.
+    const noDbQ = await s.req("db_query", { sql: "SELECT 1" });
+    assert(
+      noDbQ.ok === false && String(noDbQ.error).includes("YATT_APP_DB"),
+      "db_query sin base configurada da error claro",
+    );
+    const noDbStep = await s.req("run_step", { step: { action: "db_assert", sql: "SELECT 1" } });
+    assert(
+      noDbStep.ok === false && String(noDbStep.error).includes("YATT_APP_DB"),
+      "db_assert sin base configurada da error claro",
+    );
 
     await s.req("close", {});
     const noPage = await s.req("run_step", { step: { action: "click", selector: "h1" } });
@@ -233,6 +248,10 @@ const preview: Section = {
     assert(by.ok === true, "scroll_by (rueda) ok");
     const cl = await s.req("click_at", { x: 640, y: 400 });
     assert(cl.ok === true && typeof cl.result?.screenshot === "string", "click_at por coordenadas ok");
+    assert(
+      typeof cl.result?.selector === "string" && cl.result.selector.length > 0 && typeof cl.result?.tag === "string",
+      `click_at resuelve selector: ${cl.result?.selector} (<${cl.result?.tag}>)`,
+    );
   },
 };
 
@@ -393,7 +412,142 @@ const condition: Section = {
     const falseLit = await s.req("condition", { value: "false" });
     assert(falseLit.result?.value === false, "condition: 'false' = false");
 
+    // Polling opcional (timeoutMs > 0): early-exit con true y false tras timeout.
+    const pollHit = await s.req("condition", { selector: "#yes", timeoutMs: 1000, intervalMs: 50 });
+    assert(
+      pollHit.result?.value === true && pollHit.result?.elapsedMs < 300,
+      "condition polling: early exit con true (elapsedMs " + pollHit.result?.elapsedMs + ")",
+    );
+    const pollMiss = await s.req("condition", { selector: "#no", timeoutMs: 400, intervalMs: 50 });
+    assert(
+      pollMiss.result?.value === false && pollMiss.result?.elapsedMs >= 300,
+      "condition polling: false tras timeout (elapsedMs " + pollMiss.result?.elapsedMs + ")",
+    );
+    // Compatibilidad: sin timeoutMs sigue siendo un solo chequeo.
+    const oneShot = await s.req("condition", { selector: "#yes" });
+    assert(oneShot.result?.value === true, "condition sin timeoutMs: un solo chequeo");
+
     await s.req("close", {});
+  },
+};
+
+// Base SQLite efímera de la app bajo prueba (paso db_*): en /tmp, no toca nada
+// del repo. La crea la sección db; el sidecar se lanza con YATT_APP_DB apuntando
+// a ese archivo.
+const DB_TEMP_DIR = mkdtempSync(join(tmpdir(), "yatt-appdb-smoke-"));
+const APP_DB_PATH = join(DB_TEMP_DIR, "app.db");
+
+const db: Section = {
+  name: "db (appdb)",
+  env: { YATT_APP_DB: APP_DB_PATH },
+  async run(s, assert) {
+    // Semilla: tabla + 2 filas en la base efímera.
+    const seed = new Database(APP_DB_PATH);
+    seed.exec("CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT)");
+    seed.run("INSERT INTO users (name) VALUES ('ana'), ('beto')");
+    seed.close();
+
+    // Los pasos db_* corren por run_step, que exige una pestaña activa.
+    await s.req("open", { url: "about:blank", headless: true });
+
+    // db_query: columnas + filas como arrays + totalRows.
+    const q = await s.req("db_query", { sql: "SELECT id, name FROM users ORDER BY id" });
+    assert(q.ok === true, "db_query responde");
+    assert(
+      JSON.stringify(q.result?.columns) === '["id","name"]',
+      "db_query columnas: " + JSON.stringify(q.result?.columns),
+    );
+    assert(
+      Array.isArray(q.result?.rows) && q.result.rows.length === 2 && q.result.totalRows === 2,
+      "db_query 2 filas + totalRows",
+    );
+    assert(
+      Array.isArray(q.result?.rows?.[0]) && q.result.rows[0][1] === "ana",
+      "db_query filas como arrays en orden de columnas",
+    );
+
+    // Guardia de solo lectura: INSERT rechazado.
+    const ins = await s.req("db_query", { sql: "INSERT INTO users (name) VALUES ('x')" });
+    assert(
+      ins.ok === false && String(ins.error).includes("solo lectura"),
+      "db_query rechaza INSERT: " + String(ins.error).slice(0, 60),
+    );
+
+    // db_assert expect rows: ok y fallo (0 filas).
+    assert(
+      (await runStep(s, "db_assert", { sql: "SELECT * FROM users" })).ok === true,
+      "db_assert expect rows ok",
+    );
+    const rowsFail = await runStep(s, "db_assert", { sql: "SELECT * FROM users WHERE id = 999" });
+    assert(rowsFail.ok === false, "db_assert expect rows falla con 0 filas: " + String(rowsFail.error).slice(0, 60));
+
+    // db_assert expect value: ok y fallo (mensaje esperado-vs-obtenido).
+    assert(
+      (
+        await runStep(s, "db_assert", {
+          sql: "SELECT name FROM users WHERE id = 1",
+          expect: "value",
+          value: "ana",
+        })
+      ).ok === true,
+      "db_assert expect value ok",
+    );
+    const valFail = await runStep(s, "db_assert", {
+      sql: "SELECT name FROM users WHERE id = 1",
+      expect: "value",
+      value: "otro",
+    });
+    assert(
+      valFail.ok === false &&
+        String(valFail.error).includes('"otro"') &&
+        String(valFail.error).includes('"ana"'),
+      "db_assert expect value falla con esperado-vs-obtenido: " + String(valFail.error).slice(0, 70),
+    );
+
+    // db_assert expect empty: ok y fallo.
+    assert(
+      (
+        await runStep(s, "db_assert", { sql: "SELECT * FROM users WHERE id = 999", expect: "empty" })
+      ).ok === true,
+      "db_assert expect empty ok",
+    );
+    const emptyFail = await runStep(s, "db_assert", { sql: "SELECT * FROM users", expect: "empty" });
+    assert(
+      emptyFail.ok === false,
+      "db_assert expect empty falla con filas: " + String(emptyFail.error).slice(0, 60),
+    );
+
+    // db_wait: coincide rápido, y timeout acotado (1s, intervalo 0.1s).
+    assert(
+      (
+        await runStep(s, "db_wait", {
+          sql: "SELECT name FROM users WHERE id = 1",
+          value: "ana",
+          timeout: 2,
+          interval: 0.1,
+        })
+      ).ok === true,
+      "db_wait coincide rápido",
+    );
+    assert(
+      (await runStep(s, "db_wait", { sql: "SELECT * FROM users", timeout: 1, interval: 0.1 })).ok === true,
+      "db_wait sin value espera filas",
+    );
+    const t0 = Date.now();
+    const wFail = await runStep(s, "db_wait", {
+      sql: "SELECT name FROM users WHERE id = 1",
+      value: "nope",
+      timeout: 1,
+      interval: 0.1,
+    });
+    const waited = Date.now() - t0;
+    assert(
+      wFail.ok === false && waited >= 900 && waited < 3000,
+      `db_wait timeout falla acotado (${waited} ms): ` + String(wFail.error).slice(0, 60),
+    );
+
+    await s.req("close", {});
+    rmSync(DB_TEMP_DIR, { recursive: true, force: true });
   },
 };
 
@@ -519,7 +673,7 @@ const session: Section = {
   },
 };
 
-const SECTIONS: Section[] = [core, toolbar, preview, form, vars, grab, condition, tabs, visual, session];
+const SECTIONS: Section[] = [core, toolbar, preview, form, vars, grab, condition, tabs, db, visual, session];
 
 // Sección opcional (abre una ventana real en el display): se ejecuta solo si se
 // pide explícitamente, para no molestar en la suite por defecto.
