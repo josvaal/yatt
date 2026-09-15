@@ -26,7 +26,7 @@ import {
 } from "playwright";
 import { HELPER_JS, selectorAtPoint } from "./interaction.ts";
 import { ensureBrowser } from "./browser-install.ts";
-import { appDbConfigured, appDbQuery, closeAppDb } from "./appdb.ts";
+import { appDbQuery, closeAppDb } from "./appdb.ts";
 import {
   executeLeaf,
   evalConditionOn,
@@ -680,11 +680,7 @@ async function handleRequest(id: number, method: string, params: Record<string, 
 
       // ---- Consulta de solo lectura contra la base de la app (pasos db_*) ----
       case "db_query": {
-        if (!appDbConfigured()) {
-          respond(id, false, { error: "definí YATT_APP_DB (o --app-db)" });
-          return;
-        }
-        const result = await appDbQuery(String(params.sql ?? ""));
+        const result = await appDbQuery(String(params.sql ?? ""), params.db);
         respond(id, true, { result });
         break;
       }

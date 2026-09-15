@@ -90,7 +90,6 @@ Los pasos db_assert y db_wait consultan la base de datos de la app bajo prueba.
 Definí la conexión con la variable de entorno YATT_APP_DB o el flag --app-db del
 CLI (ruta de SQLite o URL "file:" / postgres://; la conexión es de solo lectura
 y las respuestas se recortan a 200 filas, aunque totalRows cuenta todas).
-
 { "action": "db_assert", "sql": "SELECT status FROM orders WHERE id = {{orderId}}", "expect": "value", "value": "paid" }
 { "action": "db_wait", "sql": "SELECT status FROM jobs WHERE id = {{jobId}}", "value": "done", "timeout": 15, "interval": 0.5 }
 

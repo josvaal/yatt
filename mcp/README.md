@@ -18,7 +18,7 @@ validación/export/reportes del frontend.
 | **Runner** | `test_run` (headless, env, overrides, reporte) · `test_run_dataset` (data-driven por filas) |
 | **Navegador en vivo** | `browser_open` · `browser_close` · `browser_status` · `browser_preview` (**screenshot que la IA ve**) · `browser_eval` (JS) · `browser_run_step` · `browser_condition` (soporta timeout de polling) · `browser_scroll` · `browser_click_at` (devuelve el selector resuelto) · `tab_open/list/switch/close` · `session_save/list/delete` |
 | **Reportes** | `report_list` · `report_get` · `report_delete` |
-| **DB** | `db_query` (consultas de solo lectura contra la base de la app: `YATT_APP_DB`) |
+| **DB** | `db_query` (consultas de solo lectura contra la base de la app; conexión por parámetro `db` o `YATT_APP_DB`) |
 | **Meta** | `ping` · `schema` · `baseline_list` · `baseline_get` (imagen) |
 
 **Recursos**: `yatt://schema` (formato del test), `yatt://tests/{nombre}`,
@@ -56,7 +56,9 @@ o usando `--root` explícito). El server detecta la raíz del repo automáticame
 ```
 
 La variable `YATT_APP_DB` (opcional) apunta a la base de datos de tu app bajo
-prueba y habilita los pasos `db_assert`/`db_wait` y la tool `db_query`.
+prueba y habilita los pasos `db_assert`/`db_wait` y la tool `db_query`. Como
+alternativa, la tool `db_query` acepta el parámetro `db` (ruta de SQLite o URL
+`file:` / `postgres://`) directamente en cada llamada, sin preconfigurar nada.
 
 **Claude Code / Cursor / Zed**: mismo patrón (`command` + `args`).
 Si el repositorio está en otra ruta o querés otra raíz de datos:

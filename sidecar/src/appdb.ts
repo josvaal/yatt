@@ -165,13 +165,16 @@ async function getHandle(key: string): Promise<AppDbHandle> {
 }
 
 /**
- * Ejecuta una consulta de solo lectura contra la base de la app. Sin
- * configuración lanza el error canónico que muestran los pasos db_*.
+ * Ejecuta una consulta de solo lectura contra la base de la app. Si se pasa
+ * `override` (ruta/URL), gana sobre la configuración global (flag/env); así el
+ * bridge puede recibir la conexión por parámetro sin arrancar el sidecar con
+ * nada preconfigurado. Sin ninguna de las dos lanza el error canónico.
  */
-export async function appDbQuery(sql: string): Promise<AppDbResult> {
-  const source = appDbSource();
+export async function appDbQuery(sql: string, override?: unknown): Promise<AppDbResult> {
+  const fromParam = String(override ?? "").trim();
+  const source = fromParam || appDbSource();
   if (!source) {
-    throw new Error("definí YATT_APP_DB (o --app-db) para usar pasos db_*");
+    throw new Error("definí YATT_APP_DB (o --app-db), o pasá el parámetro db a la tool db_query");
   }
   assertReadOnly(sql);
   const db = await getHandle(source);

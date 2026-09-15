@@ -226,6 +226,16 @@ const textOf = (res: unknown) => {
         dbq.rows?.[0]?.[1] === "ana",
       JSON.stringify(dbq).slice(0, 90),
     );
+    // La conexión también puede venir por parámetro `db` de la tool.
+    const dbqParam = await jsonOf("db_query", {
+      sql: "SELECT id, name FROM users ORDER BY id",
+      db: APP_DB_PATH,
+    });
+    check(
+      "db_query con parámetro db",
+      JSON.stringify(dbqParam.columns) === '["id","name"]' && dbqParam.totalRows === 2,
+      JSON.stringify(dbqParam).slice(0, 90),
+    );
     const dbIns = await call("db_query", { sql: "INSERT INTO users (name) VALUES ('x')" });
     check(
       "db_query solo lectura",
