@@ -15,6 +15,16 @@ Node). Tests guardados como JSON.
 Estado actual: **Fase 2 completada — variables, entornos y data-driven** (ver
 `ROADMAP.md` y `PRODUCT.md`).
 
+## Documentación
+
+| Doc | Contenido |
+|---|---|
+| [`ARCHITECTURE.md`](ARCHITECTURE.md) | Arquitectura completa: los 4 subsistemas, persistencia, flujos, decisiones |
+| [`docs/protocolo-sidecar.md`](docs/protocolo-sidecar.md) | JSON-RPC del sidecar: los 26 métodos, eventos, ciclo de vida, watchdogs, CLI headless |
+| [`docs/mcp-server.md`](docs/mcp-server.md) | Servidor MCP: catálogo completo de las 35 tools, recursos, prompts, arquitectura interna |
+| [`docs/formato-tests-reportes.md`](docs/formato-tests-reportes.md) | Formato de test v1 (28 acciones, variables, dataset) y formato de reportes |
+| [`PRODUCT.md`](PRODUCT.md) / [`REQUIREMENTS.md`](REQUIREMENTS.md) / [`ROADMAP.md`](ROADMAP.md) | Producto, requisitos y roadmap |
+
 ## Capturas
 
 **Editor** — pasos del test, panel del navegador y preview en vivo:

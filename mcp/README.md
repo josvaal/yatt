@@ -10,7 +10,9 @@ no reimplementa nada del runner, reutiliza la misma base de datos (`yatt.db`),
 los mismos archivos (`tests/`, `reports/`, `exports/`) y los mismos módulos de
 validación/export/reportes del frontend.
 
-## Qué puede hacer (~34 tools)
+## Qué puede hacer (35 tools)
+
+> Referencia completa con firmas y params: [`docs/mcp-server.md`](../docs/mcp-server.md).
 
 | Área | Tools |
 |---|---|

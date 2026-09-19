@@ -1,5 +1,12 @@
 # Arquitectura — YATT
 
+> YATT (Yet Another Testing Tool): app de escritorio para testing de UI
+> interactivo — apuntás acciones sobre un Chromium real y el test se construye
+> y valida paso a paso, sin escribir código.
+
+Docs complementarias: [protocolo del sidecar](docs/protocolo-sidecar.md) ·
+[servidor MCP](docs/mcp-server.md) · [formato de tests y reportes](docs/formato-tests-reportes.md)
+
 ## Vista de alto nivel
 
 ```
@@ -31,55 +38,141 @@
 └────────────────────────────────────────────────────────────┘
            │                              │
            ▼                              ▼
-  ┌───────────────────┐        ┌──────────────────────┐
-  │ Filesystem: tests │        │ Reports: JSON + HTML │
-  │ *.yatt.json, sets │        │ screenshots, logs,   │
-  │ (usuario/proyecto)│        │ tiempos              │
-  └───────────────────┘        └──────────────────────┘
+   ┌───────────────────┐        ┌──────────────────────┐
+   │ SQLite yatt.db +  │        │ Reports: JSON + HTML │
+   │ espejos: tests/,  │        │ screenshots, logs,   │
+   │ reports/, baselines/│      │ tiempos              │
+   └───────────────────┘        └──────────────────────┘
+
+  En paralelo, el servidor MCP (mcp/) habla con el MISMO sidecar y la
+  MISMA yatt.db para que un asistente de IA use YATT sin la app.
 ```
 
-## Componentes
+## Los cuatro subsistemas
 
-- **Frontend / cliente (React 19 + Vite + Tailwind 4 + shadcn/ui)**: la interfaz del editor (panel de pasos, barra de acciones flotante, variables y entornos), la vista de sets (lista de tests JSON) y la UI del runner con reportes. Se comunica con Rust únicamente vía Tauri IPC.
-- **Core Rust (Tauri 2)**: expone los comandos de la app (crear/abrir/guardar tests, lanzar browser, ejecutar pasos), gestiona el ciclo de vida del sidecar Node (spawn, estado, kill limpio) y manipula el filesystem local.
-- **Playwright sidecar (Node)**: proceso hijo que controla Chromium y habla JSON-RPC sobre stdin/stdout con Rust. Es el único componente que toca el navegador: abre la instancia (visible o headless), ejecuta pasos, captura selectores y evidencia. Al estar separado, un crash del browser no tumba la app: se mata el sidecar y se relanza.
-- **Datos**: tests y sets como archivos JSON (esquema versionado) en el filesystem del usuario; histórico de corridas y reportes también en JSON + HTML. Sin base de datos.
-- **Servicios externos**: ninguno en la primera versión (100 % local).
+### 1. Frontend (React 19 + Vite + Tailwind 4 + shadcn/ui)
 
-## Flujo principal
+- **Sin router**: la navegación es por estado (`PageId` en
+  `src/editor/context.tsx`): `editor | variables | data | run | reports`.
+- **`EditorContext`** (Context + hooks, sin Redux): un solo store con ~90
+  miembros — árbol de pasos, estados por paso, preview, variables/entornos,
+  dataset, flags de corrida y **refs de control de flujo** (pausa con
+  promise-gate, stop, paso-a-paso, re-grabado pendiente, logs ≤300).
+  Helpers recursivos sobre el árbol (`findStepRec`, `mapStepRec`, ...).
+- **Páginas** (`src/pages/`): `editor.tsx` (árbol de pasos, preview viva,
+  motor/viewport/tz/geo, pestañas, sesiones, export), `run.tsx` (corrida con
+  pausa/stop/paso-a-paso/timeout), `reports.tsx` (corrida de set + historial),
+  `variables.tsx` (CRUD de variables y entornos), `data.tsx` (CSV data-driven).
+- **`src/lib/`**: `yatt.ts` (cliente del bridge: tipos de las 28 acciones +
+  `request()` único sobre `invoke("sidecar_request")` + listeners),
+  `vars.ts` (interpolación `{{var}}` pura), `report.ts` (RunReport + HTML
+  autocontenido, compartido con el MCP), `import.ts` (validación al importar),
+  `export.ts` (spec Playwright/Jest), `i18n.tsx` (es/en, ~230 claves).
+- **Eventos del sidecar** por un único canal Tauri (`yatt://event`):
+  `action_captured`, `browser_status`, `tabs_changed`, `sidecar_ready`,
+  `browser_install_*`, `log`, `grab_result`, `sidecar_exited/error`.
 
-1. El usuario crea un test en YATT; el frontend pide a Rust lanzar el browser.
-2. Rust arranca el sidecar Node y le ordena abrir Chromium en la URL inicial (visible o headless).
-3. El usuario señala elementos sobre la página; la UI muestra la barra de acciones y crea pasos con el selector capturado por el sidecar.
-4. Cada paso nuevo se envía al sidecar para ejecutarse al instante; el resultado (OK/fail + screenshot de evidencia) vuelve a la UI.
-5. Al guardar, Rust serializa el test a `*.yatt.json` (schemaVersion, steps, variables, entornos, config del navegador).
-6. Para correr un set: el runner itera los tests, el sidecar ejecuta la secuencia de pasos en headless y devuelve resultados; Rust genera el reporte (JSON + HTML) con evidencia.
-7. Si un paso falla en una corrida, el reporte guarda screenshot + error (y en los pasos ok, screenshot de evidencia); en el editor, el usuario re-graba el selector y revalida en un clic.
+### 2. Core Rust (Tauri 2, `src-tauri/src/`)
 
-## Stack tecnológico propuesto
+- **Comandos IPC** (`storage.rs`): `test_save/list/load/delete`,
+  `report_save/list/delete/path`, `baseline_list`, `export_save`,
+  `sidecar_request`, `sidecar_stop`. `sanitize(name)` rechaza vacío,
+  separadores y `..`.
+- **Puente JSON-RPC** (`sidecar.rs`): spawn del sidecar (candidatos:
+  `$YATT_SIDECAR` → binario junto al ejecutable → `bun run` → `node`),
+  `read_loop` por línea que resuelve pendejos por `id` (oneshot) y re-emite
+  eventos al frontend; timeouts 900 s (`open`) / 180 s (resto); shutdown
+  limpio cerrando stdin (el sidecar ve EOF → cierra Chromium → exit 0) con
+  kill a los 5 s. Log en `yatt-sidecar.log` (podado a 1 MB).
+- **SQLite** (`db.rs`): conexión única `Mutex<Connection>`, WAL,
+  busy_timeout 5000. En arranque: `migrate()` (importa ficheros legacy sin
+  fila) y `resync()` (materializa filas sin espejo). Sesiones viven **solo**
+  en BD.
+
+### 3. Sidecar Playwright (Node, `sidecar/src/`)
+
+- **`index.ts`**: servidor JSON-RPC por líneas (ver
+  [protocolo](docs/protocolo-sidecar.md) — 26 métodos, watchdog interno
+  `withTimeout` por operación). Un browser por proceso.
+- **`engine.ts`**: ejecución de las 28 acciones con Playwright, screenshots de
+  evidencia en éxito y fallo, runner de bloques (`if/repeat/for_each/run_flow`),
+  interpolación de variables. Compartido entre bridge y CLI.
+- **`interaction.ts`**: barra flotante inyectada en la página (JS + CSS
+  shadcn-like, iconos lucide inline, draggable, posición en sessionStorage).
+  Modelo "acción primero, objetivo después": intercepta el próximo clic,
+  calcula el selector (`data-testid` → `#id` → CSS corto único → path capado
+  a 5 niveles, ignorando el DOM propio), pide valor inline si la acción lo
+  requiere (autocompleta asserts con el valor actual), ejecuta el paso real y
+  reporta ok/error a la barra. `Esc` cancela.
+- **`db.ts`**: acceso del sidecar a la **misma `yatt.db`** (escribe solo
+  `sessions` y `baselines`). **`appdb.ts`**: conexión de solo lectura a la BD
+  de la **app bajo prueba** (SQLite readonly o Postgres con `BEGIN READ ONLY`,
+  guardia `select|with|explain|pragma`).
+- **`cli.ts`**: runner headless para CI con flags (`--browser --env
+  --override --timeout --app-db --report --json --log`) y exit codes 0/1/2.
+
+### 4. Servidor MCP (`mcp/`)
+
+35 tools + 3 recursos + 5 prompts para asistentes de IA. Habla con el **mismo**
+sidecar y la **misma** `yatt.db`; las corridas headless van por el CLI
+one-shot. Detalle completo: [docs/mcp-server.md](docs/mcp-server.md).
+
+## Persistencia
+
+- **`yatt.db`** (SQLite, WAL, raíz de datos = `$YATT_ROOT` > repo en dev):
+  tablas `tests`, `reports`, `baselines` (PNG blob), `sessions`
+  `(name PK, content|png|storage_state, updated_at)`. Fuente de verdad.
+- **Espejos** en filesystem (git, CLI, "abrir con el SO"):
+  `tests/<name>.yatt.json`, `reports/<name>`, `baselines/<name>.png`. Se
+  escriben **junto** a la fila BD, nunca solos. Sesiones: solo BD.
+- El esquema está duplicado a mano en Rust, sidecar y MCP — mantenerlos
+  sincronizados es un invariante manual.
+
+## Flujos clave
+
+1. **Grabación**: `open` → barra flotante inyectada → acción + clic → el paso
+   se ejecuta de verdad → evento `action_captured` → paso agregado/reemplazado
+   en el árbol con su estado.
+2. **Re-grabado**: `start_grab` → próximo clic → `grab_result {selector}` →
+   se parcha el selector y se re-ejecuta al instante.
+3. **Preview**: ciclo `preview` / `scroll_by` / `click_at` sobre screenshots
+   base64; el clic en la imagen mapea a coordenadas reales del viewport.
+4. **Corrida**: runner del frontend (recursivo, respeta pausa/stop/paso-a-paso)
+   o CLI headless; cada hoja produce `RunRecord` con evidencia; el reporte
+   (JSON + HTML) se persiste en BD + espejo.
+5. **Sync ventana↔viewport** (visible + chromium): polling CDP cada 400 ms,
+   autocalibración del marco, `setViewportSize` solo con la ventana estable.
+
+## Stack y decisiones
 
 | Capa | Tecnología | Justificación |
 |---|---|---|
-| Shell desktop | Tauri 2 (Rust) | Ya en el repo; app ligera, acceso a filesystem y procesos, instaladores nativos |
-| Cliente (UI) | React 19 + Vite + TypeScript + Tailwind 4 + shadcn/ui (base-ui) + lucide-react | Ya en el repo; UI rápida, consistente y con a11y decente |
-| Motor de browser | Playwright (Node) en sidecar | Ya conocida por el equipo; estándar para controlar Chromium; APIs maduras de selector, assert y screenshots |
-| Comunicación | Tauri IPC (invoke/event) + JSON-RPC (stdin/stdout) en el sidecar | Separa UI ↔ Rust ↔ Node; el sidecar es aislable y reiniciable |
-| Persistencia | Archivos JSON (`*.yatt.json`) en el filesystem | Requisito del usuario: formato universal, portable y versionable |
-| Reportes | JSON + HTML estático generado localmente, screenshots en carpeta de artefactos | Legibles y compartibles, sin infraestructura |
-| Gestión de paquetes | Bun | Ya en el repo (`bun.lock`) |
+| Shell desktop | Tauri 2 (Rust) | ligero, filesystem y procesos nativos |
+| UI | React 19 + Vite + TS + Tailwind 4 + shadcn/ui | rápido y consistente |
+| Motor | Playwright (Node) en sidecar | APIs maduras de selector/assert/screenshot; aislable y reiniciable |
+| Comunicación | Tauri IPC + JSON-RPC stdio | separa UI ↔ Rust ↔ Node |
+| Persistencia | SQLite (fuente de verdad) + espejos JSON/PNG | universal, versionable, CLI-friendly |
+| Reportes | JSON + HTML autocontenido (imgs base64) | sin infraestructura |
+| Gestión | Bun | repo estándar |
 
-## Decisiones clave
+Decisiones clave:
 
-- **Playwright en sidecar Node, no en Rust**: el ecosistema Node de Playwright es el que el equipo ya usa; mantener el motor en Node evita reimplementar selectores/asserts en Rust. El sidecar es un proceso aislado: si Chromium se cuelga, se mata y se relanza sin reiniciar la app.
-- **Browser visible en ventana propia**, no embebido en la webview de Tauri: un Chromium real no se incrusta de forma fiable; una ventana separada es fiel, sin lag y permite interacción natural. En headless, la UI muestra previews por screenshot de cada paso.
-- **JSON versionado como fuente de verdad**: `schemaVersion` permite migrar tests viejos al abrir sin romper el formato; los archivos pueden vivir en el repo del proyecto bajo prueba.
-- **Selectores con varias estrategias y fallback**: prioridad `data-testid` → role/texto accesible → CSS autogenerado; captura automática al apuntar + edición manual y re-grabado en un clic cuando un paso falla.
-- **Runner secuencial en v1**: un browser a la vez; el paralelismo y la interrupción limpia quedan para fases posteriores (RNF-08).
-- **Sin telemetría y sin servicios externos**: todo corre local; las variables sensibles se enmascaran en logs y reportes (RNF-05).
+- **Playwright en sidecar Node, no en Rust**: si Chromium se cuelga, se mata y
+  relanza el sidecar sin reiniciar la app.
+- **Browser en ventana propia**, no embebido en la webview: un Chromium real no
+  se incrusta de forma fiable; en headless la UI vive de la preview.
+- **BD fuente de verdad + espejo**: git y CLI siguen funcionando; los espejos
+  se re-materializan (`resync`) si falta alguno.
+- **Selectores decididos al grabar, no al ejecutar**: robustez en captura,
+  ejecución determinística (`page.locator` tal cual).
+- **100 % local, sin telemetría**: variables sensibles enmascaradas en logs y
+  reportes (RNF-05).
 
 ## Despliegue
 
-- **Desarrollo**: `bun tauri dev` (Vite + hot reload; el sidecar Node se arranca como proceso hijo también en dev).
-- **Build/Package**: `bun tauri build` → instaladores nativos (deb/rpm/AppImage en Linux, NSIS en Windows, DMG en macOS).
-- **Distribución**: instalador local primero; auto-updater de Tauri cuando haya canal de release.
-- **CI del propio proyecto (futuro)**: el equipo usa YATT para testear YATT — los tests de la app corren vía runner headless en el pipeline (depende de RF-28, CLI headless).
+- **Dev**: `bun tauri dev` (sidecar como hijo con `bun run`, debug con
+  `YATT_DEBUG=1`).
+- **Build**: `bun tauri build` → instaladores nativos; en empaquetado el
+  sidecar es binario (`yatt-sidecar`) junto al ejecutable.
+- **CI**: runner headless del CLI (`sidecar/src/cli.ts`) — el equipo usa YATT
+  para testear YATT.

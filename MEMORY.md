@@ -1,0 +1,1 @@
+- [Docs structure](memory/docs-structure.md) — dónde documentar cada cosa de YATT; MCP tiene 35 tools

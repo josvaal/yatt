@@ -5,6 +5,13 @@ crear tests de UI señalando acciones sobre un Chromium real; los tests se
 guardan como JSON (`tests/<nombre>.yatt.json`, `schemaVersion: 1`) con espejo
 en la base SQLite `yatt.db`.
 
+## Documentación profunda
+
+- [`ARCHITECTURE.md`](ARCHITECTURE.md) — arquitectura: frontend, core Rust, sidecar, MCP, persistencia, flujos.
+- [`docs/protocolo-sidecar.md`](docs/protocolo-sidecar.md) — JSON-RPC del sidecar (métodos, eventos, CLI).
+- [`docs/mcp-server.md`](docs/mcp-server.md) — catálogo completo de tools/recursos/prompts del MCP.
+- [`docs/formato-tests-reportes.md`](docs/formato-tests-reportes.md) — formato de test v1 y de reportes.
+
 ## MCP server (integración de IA con YATT)
 
 Este repo tiene un **servidor MCP** listo en `mcp/` que expone la herramienta
