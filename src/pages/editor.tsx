@@ -591,6 +591,8 @@ export function EditorPage() {
     savedTests,
     testName,
     handleExport,
+    exportFormat,
+    setExportFormat,
     exporting,
     tabs,
     handleTabOpen,
@@ -667,18 +669,32 @@ export function EditorPage() {
             )}
           </div>
           {steps.length > 0 && (
-            <Tooltip content={t("editor.exportTitle")}>
-              <Button
-                variant="outline"
-                size="sm"
-                className="h-7 gap-1.5 text-xs"
-                onClick={handleExport}
-                disabled={exporting}
+            <div className="flex items-center gap-2">
+              <Select
+                value={exportFormat}
+                onValueChange={(v) => setExportFormat(v as "playwright" | "jest")}
               >
-                {exporting ? <Loader2 className="size-3.5 animate-spin" /> : <FileCode2 className="size-3.5" />}
-                {exporting ? t("editor.exporting") : t("editor.export")}
-              </Button>
-            </Tooltip>
+                <SelectTrigger aria-label={t("editor.exportFormat")} className="h-7 w-32 text-xs">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectPopup>
+                  <SelectItem value="playwright">{t("editor.exportPlaywright")}</SelectItem>
+                  <SelectItem value="jest">{t("editor.exportJest")}</SelectItem>
+                </SelectPopup>
+              </Select>
+              <Tooltip content={t("editor.exportTitle")}>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  className="h-7 gap-1.5 text-xs"
+                  onClick={() => handleExport()}
+                  disabled={exporting}
+                >
+                  {exporting ? <Loader2 className="size-3.5 animate-spin" /> : <FileCode2 className="size-3.5" />}
+                  {exporting ? t("editor.exporting") : t("editor.export")}
+                </Button>
+              </Tooltip>
+            </div>
           )}
         </header>
 

@@ -172,6 +172,23 @@ const textOf = (res: unknown) => {
     check("test_rename", ren.renamed === "smoke-copy");
     const exp = await jsonOf("test_export_playwright", { name: "smoke-test" });
     check("test_export_playwright", exp.spec.includes("@playwright/test"), `len=${exp.length}`);
+    check(
+      "export playwright lineal",
+      exp.spec.includes("await page.locator(") && !exp.spec.includes("STEPS:"),
+      `sin intérprete embebido`,
+    );
+    const expJest = await jsonOf("test_export_playwright", { name: "smoke-test", format: "jest" });
+    check(
+      "test_export_playwright format=jest",
+      expJest.spec.includes("@jest/globals") && expJest.spec.includes("describe(") && expJest.spec.includes("it("),
+      `len=${expJest.length}`,
+    );
+    const badRes = await call("test_export_playwright", { name: "smoke-test", format: "mocha" });
+    check(
+      "test_export_playwright format inválido",
+      badRes.isError === true || textOf(badRes).includes("format"),
+      `res=${textOf(badRes).slice(0, 80)}`,
+    );
 
     // ---- Navegador en vivo ----
     const opened = await jsonOf("browser_open", { url: base });

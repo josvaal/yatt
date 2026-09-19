@@ -14,7 +14,7 @@ validación/export/reportes del frontend.
 
 | Área | Tools |
 |---|---|
-| **Tests** | `test_list` · `test_get` · `test_create` · `test_update` · `test_delete` · `test_rename` · `test_duplicate` · `test_validate` · `test_export_playwright` |
+| **Tests** | `test_list` · `test_get` · `test_create` · `test_update` · `test_delete` · `test_rename` · `test_duplicate` · `test_validate` · `test_export_playwright` (formato `playwright` o `jest`) |
 | **Runner** | `test_run` (headless, env, overrides, reporte) · `test_run_dataset` (data-driven por filas) |
 | **Navegador en vivo** | `browser_open` · `browser_close` · `browser_status` · `browser_preview` (**screenshot que la IA ve**) · `browser_eval` (JS) · `browser_run_step` · `browser_condition` (soporta timeout de polling) · `browser_scroll` · `browser_click_at` (devuelve el selector resuelto) · `tab_open/list/switch/close` · `session_save/list/delete` |
 | **Reportes** | `report_list` · `report_get` · `report_delete` |

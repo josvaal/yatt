@@ -3,7 +3,7 @@ import { join } from "node:path";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 
-import { buildPlaywrightSpec } from "../../../src/lib/export.ts";
+import { buildSpec, type ExportFormat } from "../../../src/lib/export.ts";
 import { parseImportedTest } from "../../../src/lib/import.ts";
 import type { TestFile } from "../../../src/lib/yatt.ts";
 import { Store } from "../db.ts";
@@ -211,14 +211,19 @@ export function registerTestTools(server: McpServer, ctx: Ctx): void {
     "test_export_playwright",
     {
       description:
-        "Genera el código Playwright (spec TypeScript) de un test guardado, con sub-flujos embebidos. Devuelve el contenido; con write: true lo guarda en exports/<nombre>.spec.ts como la app.",
+        "Genera el código de un test guardado como spec TypeScript (.spec.ts), en formato Playwright (@playwright/test) o Jest (jest-environment-playwright), con sub-flujos embebidos como funciones. Devuelve el contenido; con write: true lo guarda en exports/<nombre>.spec.ts como la app.",
       inputSchema: z.object({
         name: nameArg,
+        format: z
+          .enum(["playwright", "jest"])
+          .optional()
+          .describe("Formato del spec generado (default \"playwright\")"),
         write: z.boolean().optional().describe("Escribir el archivo en exports/ (default false)"),
       }),
     },
     async (args) => {
       const name = Store.sanitizeName(args.name);
+      const format: ExportFormat = args.format ?? "playwright";
       const content = store.testGet(name);
       if (content === null) throw new Error(`el test "${name}" no existe`);
       const doc = JSON.parse(content) as TestFile;
@@ -227,7 +232,7 @@ export function registerTestTools(server: McpServer, ctx: Ctx): void {
         if (raw === null) throw new Error(`el sub-flujo "${flowName}" no existe en la biblioteca`);
         return raw;
       };
-      const spec = await buildPlaywrightSpec(doc, loadFlow);
+      const spec = await buildSpec(doc, loadFlow, format);
       let path: string | null = null;
       if (args.write) {
         const dir = exportsDir(ctx.root);

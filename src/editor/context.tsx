@@ -72,7 +72,7 @@ import {
   type RunReport,
   type SetTestResult,
 } from "@/lib/report";
-import { buildPlaywrightSpec } from "@/lib/export";
+import { buildSpec, type ExportFormat } from "@/lib/export";
 
 export type StepStatus = "pending" | "running" | "ok" | "fail";
 export type Ids = string;
@@ -355,9 +355,11 @@ interface EditorContextValue {
   baselines: string[];
   refreshBaselines: () => Promise<void>;
 
-  // export a Playwright (RF-24)
+  // export a Playwright / Jest (RF-24)
   exporting: boolean;
-  handleExport: () => Promise<void>;
+  exportFormat: ExportFormat;
+  setExportFormat: (f: ExportFormat) => void;
+  handleExport: (format?: ExportFormat) => Promise<void>;
 
   // pasos CRUD
   addStep: (step: Omit<Step, "id">) => void;
@@ -1243,23 +1245,28 @@ export function EditorProvider({ children }: { children: ReactNode }) {
     [refreshSessions],
   );
 
-  // ---- Export a Playwright (RF-24) ----
+  // ---- Export a Playwright / Jest (RF-24) ----
 
-  const handleExport = useCallback(async () => {
-    setExporting(true);
-    setAppError(null);
-    try {
-      const doc = defaultTest(testName.trim() || "mi-test", url, steps, variables, envs, dataset ?? undefined);
-      const spec = await buildPlaywrightSpec(doc, loadTest);
-      const safe = (doc.name || "mi-test").replace(/[^a-zA-Z0-9._-]+/g, "-");
-      const path = await exportPlaywright(`${safe}.spec.ts`, spec);
-      await openReport(path);
-    } catch (err) {
-      setAppError(`No se pudo exportar: ${String(err)}`);
-    } finally {
-      setExporting(false);
-    }
-  }, [testName, url, steps, variables, envs, dataset]);
+  const [exportFormat, setExportFormat] = useState<ExportFormat>("playwright");
+
+  const handleExport = useCallback(
+    async (format: ExportFormat = exportFormat) => {
+      setExporting(true);
+      setAppError(null);
+      try {
+        const doc = defaultTest(testName.trim() || "mi-test", url, steps, variables, envs, dataset ?? undefined);
+        const spec = await buildSpec(doc, loadTest, format);
+        const safe = (doc.name || "mi-test").replace(/[^a-zA-Z0-9._-]+/g, "-");
+        const path = await exportPlaywright(`${safe}.spec.ts`, spec);
+        await openReport(path);
+      } catch (err) {
+        setAppError(`No se pudo exportar: ${String(err)}`);
+      } finally {
+        setExporting(false);
+      }
+    },
+    [testName, url, steps, variables, envs, dataset, exportFormat],
+  );
 
   // Mantiene al día el desplegable de variables de la barra flotante mientras el
   // navegador está abierto (debounce: los valores se editan en cada tecla).
@@ -1857,6 +1864,8 @@ export function EditorProvider({ children }: { children: ReactNode }) {
     baselines,
     refreshBaselines,
     exporting,
+    exportFormat,
+    setExportFormat,
     handleExport,
     addStep,
     removeStep,
