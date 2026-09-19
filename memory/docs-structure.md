@@ -17,3 +17,5 @@ type: pattern
 - El esquema SQLite está triplicado a mano (src-tauri/src/db.rs, sidecar/src/db.ts, mcp/src/db.ts) — invariante manual al tocar el esquema.
 - `test_run` del MCP corre por CLI one-shot, NO por el sidecar del browser en vivo.
 - Explorar con subagentes sdd-explore en paralelo (core vs MCP) y luego escribir docs dio muy buen resultado.
+
+**Update 2026-09-19**: Sidecar ahora tiene `bunx tsc --noEmit -p sidecar/tsconfig.json` en verde. Claves: `@types/node` en devDeps, `"lib": ["ESNext", "DOM", "DOM.Iterable"]` + `"types": ["node"]` + `"skipLibCheck": true` (Playwright necesita DOM pero choca con @types/node a nivel de librería). `src/sqlite.d.ts` ya no declara node:sqlite (lo trae @types/node ≥22.5).
