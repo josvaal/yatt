@@ -72,11 +72,17 @@ export async function openYattDb(path: string): Promise<YattDb> {
     db.exec(SCHEMA);
     return {
       run: (sql, p = []) => {
-        db.prepare(sql).run(...p);
+        db.prepare(sql).run(...(p as import("node:sqlite").SQLInputValue[]));
       },
       get: (sql, p = []) =>
-        (db.prepare(sql).get(...p) as Record<string, unknown> | undefined) ?? null,
-      all: (sql, p = []) => db.prepare(sql).all(...p) as Record<string, unknown>[],
+        (db.prepare(sql).get(...(p as import("node:sqlite").SQLInputValue[])) as
+          | Record<string, unknown>
+          | undefined) ?? null,
+      all: (sql, p = []) =>
+        db.prepare(sql).all(...(p as import("node:sqlite").SQLInputValue[])) as Record<
+          string,
+          unknown
+        >[],
       close: () => db.close(),
     };
   }

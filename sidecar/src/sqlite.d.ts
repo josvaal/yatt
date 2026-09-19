@@ -13,16 +13,4 @@ declare module "bun:sqlite" {
   }
 }
 
-declare module "node:sqlite" {
-  interface StatementSync {
-    run(...params: unknown[]): { changes: number; lastInsertRowid: number | bigint };
-    get(...params: unknown[]): unknown;
-    all(...params: unknown[]): unknown[];
-  }
-  export class DatabaseSync {
-    constructor(path: string, options?: { open?: boolean; readOnly?: boolean });
-    exec(sql: string): void;
-    prepare(sql: string): StatementSync;
-    close(): void;
-  }
-}
+// node:sqlite ya está tipado por @types/node (>=22.5); solo se declara bun:sqlite.

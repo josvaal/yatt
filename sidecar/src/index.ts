@@ -275,7 +275,9 @@ async function openBrowser(params: {
   // Sesión (RF-23): la fuente de verdad es la DB (yatt.db); fallback al fichero
   // legacy sessions/<name>.json pre-migración o si la DB no está disponible.
   const sname = params.session ? sanitizeName(String(params.session)) : "";
-  let storageState: string | { cookies: unknown[]; origins: unknown[] } | undefined;
+  let storageState: NonNullable<
+    import("playwright").BrowserContextOptions["storageState"]
+  > | undefined;
   if (sname) {
     const db = await getDb();
     if (db) {
