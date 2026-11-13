@@ -7,7 +7,9 @@
     "dev": "vite",
     "build": "tsc && vite build",
     "preview": "vite preview",
-    "tauri": "tauri"
+    "tauri": "cargo run --manifest-path desktop/Cargo.toml",
+    "app": "cargo run --manifest-path desktop/Cargo.toml",
+    "test": "bun test src/lib"
   },
   "dependencies": {
     "@base-ui/react": "^1.7.0",
