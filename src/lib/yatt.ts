@@ -267,7 +267,7 @@ export function defaultTest(
     name,
     url,
     headless: false,
-    steps: steps.map(({ id, ...rest }) => ({ id, ...rest })),
+    steps,
     variables,
     envs,
     dataset,

@@ -12,6 +12,7 @@ import { PNG } from "pngjs";
 import type { BrowserContext, Page } from "playwright";
 import { openYattDb, type YattDb } from "./db.ts";
 import { appDbConfigured, appDbQuery, type AppDbResult } from "./appdb.ts";
+import { interpolate, resolveStep } from "../../src/lib/vars.ts";
 
 export interface Step {
   id?: string;
@@ -98,24 +99,11 @@ export interface LeafContext {
   onNewPage?(p: Page): void;
 }
 
-/** Interpola {{nombre}} con el ámbito de variables dado. */
-export function interp(value: string | undefined, vars: Record<string, string>): string | undefined {
-  if (value === undefined) return undefined;
-  return String(value).replace(/\{\{\s*([\w.-]+)\s*\}\}/g, (m, name: string) =>
-    Object.prototype.hasOwnProperty.call(vars, name) ? vars[name] : m,
-  );
-}
+/** Interpola {{nombre}} con el ámbito de variables dado (fuente única: src/lib/vars.ts). */
+export const interp = interpolate;
 
 /** Resuelve los campos interpolables de un paso (value, selector, attribute, sql). */
-export function resolve(step: Step, vars: Record<string, string>): Step {
-  return {
-    ...step,
-    value: interp(step.value, vars),
-    selector: interp(step.selector, vars),
-    attribute: interp(step.attribute, vars),
-    sql: interp(step.sql, vars),
-  };
-}
+export const resolve = resolveStep;
 
 /** Condición de `if` (RF-18): existe el elemento, o valor no vacío. */
 export async function evalConditionOn(p: Page, selector?: string, value?: string): Promise<boolean> {

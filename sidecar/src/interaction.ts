@@ -301,6 +301,7 @@ export const HELPER_JS = `(function () {
     try { return document.querySelectorAll(sel).length === 1; } catch (e) { return false; }
   }
   function escAttr(v) { return String(v).replace(/"/g, '\\"'); }
+  function escH(s) { return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;'); }
   function tagIndex(parent, node) {
     var kids = parent.children, n = 0;
     for (var i = 0; i < kids.length; i++) {
@@ -422,7 +423,7 @@ export const HELPER_JS = `(function () {
       HTML = '<select class="yatt-opt">';
       opts.forEach(function (o) {
         var v = (o.getAttribute && o.getAttribute('value')) || o.text;
-        HTML += '<option value="' + String(v).replace(/"/g, '&quot;') + '">' + o.text + '</option>';
+        HTML += '<option value="' + escH(v) + '">' + escH(o.text) + '</option>';
       });
       HTML += '</select>';
     } else if (action === 'assert_attribute') {
@@ -466,7 +467,7 @@ export const HELPER_JS = `(function () {
     var h = '<select class="yatt-var" title="Insertar variable {{nombre}}">' +
       '<option value="">⟦ {{variable}} ⟧</option>';
     VARS.forEach(function (n) {
-      h += '<option value="' + String(n).replace(/"/g, '&quot;') + '">' + n + '</option>';
+      h += '<option value="' + escH(n) + '">' + escH(n) + '</option>';
     });
     return h + '</select>';
   }
@@ -491,7 +492,7 @@ export const HELPER_JS = `(function () {
     if (!sel) { return; }
     var h = '<option value="">⟦ {{variable}} ⟧</option>';
     VARS.forEach(function (n) {
-      h += '<option value="' + String(n).replace(/"/g, '&quot;') + '">' + n + '</option>';
+      h += '<option value="' + escH(n) + '">' + escH(n) + '</option>';
     });
     sel.innerHTML = h;
     sel.value = '';

@@ -40,15 +40,17 @@ export interface StepLike {
   value?: string;
   selector?: string;
   attribute?: string;
+  sql?: string;
 }
 
-/** Resuelve los campos interpolables de un paso (value, selector, attribute). */
+/** Resuelve los campos interpolables de un paso (value, selector, attribute, sql). */
 export function resolveStep<T extends StepLike>(step: T, vars: Record<string, string>): T {
   return {
     ...step,
     value: interpolate(step.value, vars),
     selector: interpolate(step.selector, vars),
     attribute: interpolate(step.attribute, vars),
+    sql: interpolate(step.sql, vars),
   };
 }
 

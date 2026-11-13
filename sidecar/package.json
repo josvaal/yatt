@@ -6,11 +6,11 @@
     "dev": "bun run index.ts"
   },
   "dependencies": {
-    "pg": "^8.23.0",
     "playwright": "^1.62.1",
     "pngjs": "^7.0.0"
   },
   "devDependencies": {
-    "@types/node": "^26.6.2"
+    "@types/node": "^26.6.2",
+    "pg": "^8.23.0"
   }
 }

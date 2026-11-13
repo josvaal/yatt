@@ -5,7 +5,7 @@ import { join } from "node:path";
 
 import { buildReportHtml, buildReportJson, reportSlug, type RunRecord, type RunReport } from "../../src/lib/report.ts";
 import { sidecarDir } from "./root.ts";
-import type { Store } from "./db.ts";
+import { Store } from "./db.ts";
 
 /**
  * Runner headless del MCP: spawns one-shot del CLI del sidecar por corrida
@@ -50,7 +50,8 @@ interface CliOutcome {
 }
 
 export async function runTestHeadless(store: Store, root: string, req: RunRequest): Promise<RunSummary> {
-  const file = join(root, "tests", `${req.name}.yatt.json`);
+  const name = Store.sanitizeName(req.name);
+  const file = join(root, "tests", `${name}.yatt.json`);
   if (!existsSync(file)) {
     throw new Error(`el test "${req.name}" no está guardado (crealo con test_create primero)`);
   }

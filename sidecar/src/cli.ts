@@ -203,7 +203,7 @@ async function main() {
   // Base de la app (pasos db_*): el flag gana sobre la env YATT_APP_DB.
   setAppDbFlag(opts.appDb);
 
-  let doc: { name?: string; url?: string; steps?: Step[]; variables?: Array<{ name: string; values?: Record<string, string> }> };
+  let doc: { name?: string; url?: string; steps?: Step[]; variables?: Array<{ name: string; values?: Record<string, string> }>; dataset?: { rows?: unknown[] } };
   try {
     if (!existsSync(file)) throw new Error(`el archivo no existe: ${file}`);
     doc = JSON.parse(readFileSync(file, "utf8"));
@@ -213,6 +213,10 @@ async function main() {
   }
   if (!Array.isArray(doc.steps)) {
     console.error("Error: el archivo no tiene una lista de steps");
+    process.exit(2);
+  }
+  if (doc.dataset && Array.isArray(doc.dataset.rows) && doc.dataset.rows.length > 0) {
+    console.error("Error: el test es data-driven (tiene dataset); el CLI corre una sola corrida con --override. Corré las filas desde la app o con el MCP (test_run_dataset).");
     process.exit(2);
   }
 

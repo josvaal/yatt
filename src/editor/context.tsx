@@ -874,7 +874,8 @@ export function EditorProvider({ children }: { children: ReactNode }) {
       state.fail++;
       return;
     }
-    const fvars = resolveVars(doc.variables ?? [], ENV_DEFAULT, {});
+    // Mismo criterio que el engine: el sub-flujo hereda el ámbito del padre.
+    const fvars: Record<string, string> = { ...vars };
     for (const [flowVar, src] of Object.entries(step.withVars ?? {})) {
       fvars[flowVar] = resolveFlowMapping(src, vars);
     }
@@ -1733,6 +1734,12 @@ export function EditorProvider({ children }: { children: ReactNode }) {
     if (!dataset || dataset.rows.length === 0) return;
     setRunningDataset(true);
     const report: Array<{ ok: boolean; row: number; passed: number; total: number; stopped: boolean }> = [];
+    // Cada fila corre en un browser fresco, igual que el MCP (test_run_dataset).
+    if (browserOpenRef.current) {
+      await closeBrowser();
+      setBrowserOpen(false);
+      setPreview(null);
+    }
     for (let i = 0; i < dataset.rows.length; i++) {
       const row = dataset.rows[i];
       const over = { ...overrides };
@@ -1740,12 +1747,20 @@ export function EditorProvider({ children }: { children: ReactNode }) {
         // Celdas vacías → cae al valor del entorno/default.
         if (row[c] !== undefined && row[c] !== "") over[c] = row[c];
       }
+      try {
+        await openBrowser(buildOpenOptions(url, headless));
+      } catch {
+        report.push({ ok: false, row: i + 1, passed: 0, total: 0, stopped: false });
+        continue;
+      }
       const res = await executeSteps(resolveVars(variables, activeEnv, over), {
         env: activeEnv,
         url,
         headless,
         title: `${testName} · fila ${i + 1}`,
       });
+      await closeBrowser();
+      setBrowserOpen(false);
       report.push({
         ok: res.failCount === 0 && !res.stopped,
         row: i + 1,

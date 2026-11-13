@@ -191,19 +191,20 @@ fn read_loop(
 /// Arranca el sidecar si aún no está vivo. Idempotente.
 pub fn spawn(app: &AppHandle) -> Result<(), String> {
     let state = app.state::<SidecarState>();
-    if state.child.lock().unwrap().is_some() {
+    // Bajo el lock de child durante todo el check+spawn+set: dos
+    // sidecar_request simultáneos no deben spawnear dos sidecars (el perdedor
+    // quedaría huérfano). Orden child→stdin, igual que stop().
+    let mut cl = state.child.lock().unwrap();
+    if cl.is_some() {
         return Ok(());
     }
     let (child, stdin, stdout) = spawn_child()?;
     let app2 = app.clone();
     let pending = state.pending.clone();
     std::thread::spawn(move || read_loop(stdout, app2, pending));
-    {
-        let mut cl = state.child.lock().unwrap();
-        *cl = Some(child);
-        let mut sl = state.stdin.lock().unwrap();
-        *sl = Some(stdin);
-    }
+    *cl = Some(child);
+    let mut sl = state.stdin.lock().unwrap();
+    *sl = Some(stdin);
     Ok(())
 }
 

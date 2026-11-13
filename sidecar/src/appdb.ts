@@ -47,10 +47,14 @@ export function appDbConfigured(): boolean {
 
 const READ_ONLY_RE = /^\s*(select|with|explain|pragma)\b/i;
 
-/** Rechaza cualquier sentencia que no sea de lectura. */
+/** Rechaza cualquier sentencia que no sea de lectura, y el multi-statement. */
 function assertReadOnly(sql: string): void {
   if (!READ_ONLY_RE.test(sql)) {
     throw new Error("db: solo lectura (SELECT/WITH/EXPLAIN/PRAGMA)");
+  }
+  // En Postgres el string corre entero (protocolo simple): "select 1; drop table x" sería catastrófico.
+  if (sql.replace(/;+\s*$/, "").includes(";")) {
+    throw new Error("db: una sola sentencia (no se permite ';' dentro de la consulta)");
   }
 }
 
@@ -111,7 +115,7 @@ async function openSqlite(source: string): Promise<AppDbHandle> {
   }
 }
 
-/** Postgres en lectura: requiere `pg` instalado en sidecar/ (no viene por defecto). */
+/** Postgres en lectura: requiere `pg` (devDependency de sidecar/). */
 async function openPostgres(url: string): Promise<AppDbHandle> {
   let Client: new (cfg: { connectionString: string }) => {
     connect(): Promise<void>;
@@ -119,8 +123,7 @@ async function openPostgres(url: string): Promise<AppDbHandle> {
     end(): Promise<void>;
   };
   try {
-    // Import por variable: `pg` es una dependencia opcional (no está en
-    // package.json a propósito) y solo se exige si la URL es postgres://.
+    // Import por variable: `pg` es devDependency y solo se exige si la URL es postgres://.
     const pgModule = "pg";
     const pg = (await import(pgModule)) as { Client: typeof Client };
     Client = pg.Client;

@@ -337,8 +337,11 @@ async function openBrowser(params: {
 
 async function closeBrowser() {
   stopResizeSync();
-  if (browser) {
-    await withTimeout(browser.close(), 6000, "cierre del browser").catch(() => {
+  const b = browser;
+  if (b) {
+    await withTimeout(b.close(), 6000, "cierre del browser").catch(() => {
+      // Si close() se colgó, matamos el proceso para no dejar Chromium vivo.
+      try { (b as unknown as { process?: () => { kill(): void } | null }).process()?.kill(); } catch { /* ya murió */ }
       emit("log", { level: "warn", message: "browser.close() tardó más de 6s; se fuerza el estado cerrado" });
     });
   }
@@ -750,10 +753,14 @@ async function handleRequest(id: number, method: string, params: Record<string, 
   }
 }
 
+// Los requests se procesan en serie: un step largo no debe convivir con un
+// close/open que le cierre el browser por debajo.
+let chain: Promise<unknown> = Promise.resolve();
+
 async function start() {
   const rl = createInterface({ input: process.stdin, crlfDelay: Infinity });
   emit("sidecar_ready", { pid: process.pid });
-  rl.on("line", async (line) => {
+  rl.on("line", (line) => {
     if (!line.trim()) return;
     let req: { id?: unknown; method?: unknown; params?: unknown };
     try {
@@ -764,7 +771,8 @@ async function start() {
     const id = typeof req.id === "number" ? req.id : -1;
     const method = typeof req.method === "string" ? req.method : "";
     const params = (req.params && typeof req.params === "object" ? req.params : {}) as Record<string, unknown>;
-    await handleRequest(id, method, params);
+    const run = () => handleRequest(id, method, params);
+    chain = chain.then(run, run).catch(() => {});
   });
   rl.on("close", () => {
     closeBrowser()

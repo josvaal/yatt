@@ -128,7 +128,8 @@ async function runSection(sec: Section) {
   }
 }
 
-const URL = "https://example.com";
+// Fixture local: example.com ya no tiene <h1> (rediseño de IANA) y el smoke no puede depender del markup de un tercero.
+const URL = "data:text/html,<h1>Titulo</h1><a>link</a>";
 
 const core: Section = {
   name: "core",
@@ -568,7 +569,7 @@ const tabs: Section = {
     const switched = await s.req("tab_switch", { index: 0 });
     assert(switched.result.tabs[0].active === true, "tab_switch a la pestaña 0");
     const pv = await s.req("preview", {});
-    assert(String(pv.result?.url).includes("example.com"), "preview sigue a la pestaña activa");
+    assert(String(pv.result?.url).startsWith("data:text/html"), "preview sigue a la pestaña activa");
 
     // Cerrar la pestaña 1 (no activa).
     const closed = await s.req("tab_close", { index: 1 });
@@ -590,7 +591,10 @@ const tabs: Section = {
 const visual: Section = {
   name: "visual",
   async run(s, assert) {
-    await s.req("open", { url: "data:text/html,<h1>pixel</h1>", headless: true });
+    // Fixture sin texto: el antialiasing del texto hace flotar la comparación con tolerancia 0; un fondo sólido es determinístico.
+    await s.req("open", { url: "data:text/html,<body style='background:rgb(0,255,0)'>", headless: true });
+    // domcontentloaded no garantiza el primer paint; sin dos frames la captura de la base compite con el render.
+    await s.req("eval", { expression: "new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)))" });
 
     // 1) Capturar la imagen base (espejo baselines/smoke-base.png + fila en DB).
     const cap = await s.req("run_step", { step: { action: "capture_screenshot", value: "smoke-base" } });

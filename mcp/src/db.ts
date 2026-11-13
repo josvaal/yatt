@@ -78,9 +78,10 @@ export class Store {
   }
 
   deleteTest(name: string): Promise<void> {
+    const safe = Store.sanitizeName(name);
     return this.write(() => {
-      this.db.query("DELETE FROM tests WHERE name = ?1").run(name);
-      rmSync(join(testsDir(this.root), `${name}.yatt.json`), { force: true });
+      this.db.query("DELETE FROM tests WHERE name = ?1").run(safe);
+      rmSync(join(testsDir(this.root), `${safe}.yatt.json`), { force: true });
     });
   }
 
@@ -115,9 +116,10 @@ export class Store {
   }
 
   deleteReport(name: string): Promise<void> {
+    const safe = Store.sanitizeName(name);
     return this.write(() => {
-      this.db.query("DELETE FROM reports WHERE name = ?1").run(name);
-      rmSync(join(reportsDir(this.root), name), { force: true });
+      this.db.query("DELETE FROM reports WHERE name = ?1").run(safe);
+      rmSync(join(reportsDir(this.root), safe), { force: true });
     });
   }
 
