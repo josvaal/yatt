@@ -99,6 +99,7 @@ impl Bridge {
     pub async fn request_raw(self: Arc<Self>, method: &str, params: Value) -> Result<Value, String> {
         self.spawn()?;
         let id = self.next_id.fetch_add(1, Ordering::SeqCst);
+        log_line(&format!("[req] {method} id={id}"));
         let (tx, rx) = oneshot::channel::<Value>();
         {
             let mut inner = self.inner.lock().unwrap();
@@ -132,6 +133,7 @@ impl Bridge {
             }
             Either::Left((Ok(v), _)) | Either::Right((Ok(v), _)) => v,
         };
+        log_line(&format!("[resp] {method} id={id} ok={}", resp.get("ok").and_then(|v| v.as_bool()).unwrap_or(false)));
         Ok(resp)
     }
 

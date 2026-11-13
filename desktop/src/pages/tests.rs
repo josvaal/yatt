@@ -184,7 +184,6 @@ pub enum Msg {
     Add(Vec<usize>),
     Grab(Vec<usize>),
     StopGrab,
-    Grabbed(Result<Value, String>),
     #[allow(dead_code)] // llega por el evento action_captured (Page::captured)
     Captured(Step),
     VarName(usize, String),
@@ -431,25 +430,15 @@ pub fn update(page: &mut Page, sh: &mut Shared, msg: Msg) -> Task<Message> {
             Task::none()
         }
         Msg::Grab(at) => {
+            // La grabación real la hace la barra del browser (__yattRecord →
+            // action_captured); acá solo marcamos dónde insertar el paso.
             page.grab = Some(at);
-            let bridge = sh.bridge.clone();
-            cosmic::task::future(async move {
-                let r = bridge.request("start_grab", serde_json::json!({})).await;
-                Message::Tests(Msg::Grabbed(r))
-            })
+            sh.log("grabando en este nivel: usá la barra del browser");
+            Task::none()
         }
         Msg::StopGrab => {
             page.grab = None;
             sh.log("grabación detenida".to_string());
-            Task::none()
-        }
-        Msg::Grabbed(Ok(_)) => {
-            sh.log("grabando: hacé clic en la página del browser".to_string());
-            Task::none()
-        }
-        Msg::Grabbed(Err(e)) => {
-            page.grab = None;
-            page.error = Some(e);
             Task::none()
         }
         Msg::Captured(_) => Task::none(), // llega por Page::captured (evento del sidecar)
@@ -768,7 +757,7 @@ fn editor_view<'a>(page: &'a Page, sh: &'a Shared) -> cosmic::Element<'a, Messag
             .spacing(8));
     if page.grab.is_some() {
         pasos = pasos.push(widget::container(widget::row::with_capacity(3)
-            .push(widget::text("● grabando: hacé clic en la página del browser").size(12))
+            .push(widget::text("● grabando en este nivel — elegí una acción en la barra del browser y hacé clic en el elemento").size(12))
             .push(widget::Space::new().width(cosmic::iced::Length::Fill))
             .push(crate::pages::tbtn("stop", "Detener grabación", Some(Message::Tests(Msg::StopGrab))))
             .spacing(8))
@@ -873,7 +862,7 @@ fn steps_view<'a>(page: &'a Page, sh: &'a Shared, prefix: &[usize], steps: &'a [
         col = col.push(row);
 
         if page.grab.as_deref() == Some(path.as_slice()) {
-            col = col.push(mono("● grabando este nivel…"));
+            col = col.push(mono("● grabando en este nivel — usá la barra del browser"));
         }
 
         if expanded {
